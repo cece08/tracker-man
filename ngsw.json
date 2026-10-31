@@ -1,6 +1,6 @@
 {
   "configVersion": 1,
-  "timestamp": 1793483387745,
+  "timestamp": 1793483602804,
   "index": "/tracker-man/index.html",
   "assetGroups": [
     {
@@ -13,7 +13,7 @@
       "urls": [
         "/tracker-man/favicon.ico",
         "/tracker-man/index.html",
-        "/tracker-man/main-XRJ3Q2P2.js",
+        "/tracker-man/main-5AACBXRU.js",
         "/tracker-man/manifest.webmanifest",
         "/tracker-man/styles-2566NL23.css"
       ],
@@ -55,8 +55,8 @@
     "/tracker-man/icons/icon-72x72.png": "abbf3bffa8caf583516ad947100969e02e370bab",
     "/tracker-man/icons/icon-96x96.png": "e7d42749a9b3699be25fee4ad69591645313843f",
     "/tracker-man/icons/icon-maskable-512x512.png": "b0d9366b38520e0aedab339e27617ed6466e41c3",
-    "/tracker-man/index.html": "f2e1a99343a2730976152c78f0ca0e2700541441",
-    "/tracker-man/main-XRJ3Q2P2.js": "2e5655c086531641684b584ca7c59198faeda449",
+    "/tracker-man/index.html": "1a6728520616e43add79609846bfe2506375233a",
+    "/tracker-man/main-5AACBXRU.js": "0d7bf5a683ff4b66e94cbac3e918bc8b6c8d7f01",
     "/tracker-man/manifest.webmanifest": "7e6f658b0939513fac7dd120ef5b60d1ef8e3722",
     "/tracker-man/media/layers-2x-TBM42ERR.png": "152a162333e46d24f9d89f566312fc0c64011dee",
     "/tracker-man/media/layers-55W3Q4RM.png": "c9e7528e491a39232ba24a2706c6c739d6fb0f06",
