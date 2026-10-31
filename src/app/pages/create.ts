@@ -31,6 +31,23 @@ import { DEFAULT_SETTINGS, Settings, Zone } from '../core/models';
             <input type="number" min="10" max="10000" [value]="s().radiusEnd" (input)="set('radiusEnd', $event)" /></label>
           <label class="field row"><span>Rétrécit toutes les (min)</span>
             <input type="number" min="1" max="120" [value]="s().shrinkEvery" (input)="set('shrinkEvery', $event)" /></label>
+
+          <div style="margin-top: 10px">
+            <span class="hint" style="display:block; margin-bottom:6px">Actualisation périodique du cercle</span>
+            <div class="segmented">
+              <button [class.active]="!circleRefreshEnabled()" (click)="circleRefreshEnabled.set(false)">Auto (au bord)</button>
+              <button [class.active]="circleRefreshEnabled()" (click)="circleRefreshEnabled.set(true)">Toutes les X sec</button>
+            </div>
+            @if (circleRefreshEnabled()) {
+              <label class="field row">
+                <span>Actualiser toutes les (sec)</span>
+                <input type="number" min="5" max="600" step="5" [value]="circleRefreshSec()" (input)="onRefreshSec($event)" />
+              </label>
+              <p class="hint">Le cercle de chaque chassé est recalculé toutes les <b>{{ circleRefreshSec() }} s</b> (et aussi s'il sort du cercle).</p>
+            } @else {
+              <p class="hint">Le cercle ne bouge que si le chassé s'approche du bord ou quand le rayon rétrécit.</p>
+            }
+          </div>
         </div>
 
         <div class="card">
@@ -84,6 +101,8 @@ export class CreatePage implements AfterViewInit, OnDestroy {
   private zoneMapEl = viewChild<ElementRef<HTMLDivElement>>('zoneMap');
 
   readonly s = signal<Settings>({ ...DEFAULT_SETTINGS });
+  readonly circleRefreshEnabled = signal(false);
+  readonly circleRefreshSec = signal(30);
   readonly zoneEnabled = signal(false);
   readonly zone = signal<Zone>({ lat: 48.8566, lng: 2.3522, r: 1000 });
   readonly busy = signal(false);
@@ -174,6 +193,11 @@ export class CreatePage implements AfterViewInit, OnDestroy {
     }
   }
 
+  onRefreshSec(e: Event) {
+    const v = Math.max(5, Math.round(Number((e.target as HTMLInputElement).value) || 30));
+    this.circleRefreshSec.set(v);
+  }
+
   set(key: keyof Settings, e: Event) {
     const v = Math.round(Number((e.target as HTMLInputElement).value));
     this.s.update((s) => ({ ...s, [key]: v }));
@@ -191,6 +215,9 @@ export class CreatePage implements AfterViewInit, OnDestroy {
     if (!(st.radiusEnd >= 10) || st.radiusEnd > st.radiusStart) return 'Le rayon final doit être entre 10 m et le rayon de départ.';
     if (!(st.shrinkEvery >= 1)) return "L'intervalle de rétrécissement doit être d'au moins 1 min.";
     if (!(st.hunters >= 1)) return 'Il faut au moins 1 chasseur.';
+    if (this.circleRefreshEnabled() && !(this.circleRefreshSec() >= 5)) {
+      return "L'actualisation du cercle doit être d'au moins 5 secondes.";
+    }
     if (this.zoneEnabled()) {
       if (!(this.zone().r >= 50)) return 'Le rayon de la zone autorisée doit faire au moins 50 m.';
       if (!((st.outGraceSec ?? 30) >= 5)) return 'Le temps hors zone doit être d’au moins 5 secondes.';
@@ -208,6 +235,7 @@ export class CreatePage implements AfterViewInit, OnDestroy {
       const settings: Settings = {
         ...this.s(),
         zone: this.zoneEnabled() ? this.zone() : null,
+        circleRefreshSec: this.circleRefreshEnabled() ? this.circleRefreshSec() : null,
       };
       const code = await this.game.createSession(name, settings);
       this.router.navigate(['/session', code]);

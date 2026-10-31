@@ -564,11 +564,14 @@ export class GameService {
     const m = this.me();
     if (!m || m.role !== 'hunted') return;
     const { radius } = this.shrink();
+    const now = this.serverNow();
+    const refreshSec = this.session()?.settings.circleRefreshSec;
     const c = this.lastCircle && this.lastCircle.t >= (m.circle?.t ?? 0) ? this.lastCircle : m.circle;
     const d = c ? distance(pos, c) : Infinity;
-    if (!c || c.r !== radius || d > radius * 0.85) {
+    const expired = !!(c && refreshSec && refreshSec > 0 && now - c.t >= refreshSec * 1000);
+    if (!c || c.r !== radius || d > radius * 0.85 || expired) {
       const center = destPoint(pos, radius * (0.1 + Math.random() * 0.6), Math.random() * 360);
-      const circle: Circle = { lat: center.lat, lng: center.lng, r: radius, t: this.serverNow() };
+      const circle: Circle = { lat: center.lat, lng: center.lng, r: radius, t: now };
       this.lastCircle = circle;
       this.updateMe({ circle });
     }

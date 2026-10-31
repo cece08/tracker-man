@@ -26,6 +26,7 @@ import { Player } from '../core/models';
             <li>Avance : <b>{{ s().settings.headStart }} min</b></li>
             <li>Rayon : <b>{{ s().settings.radiusStart }} → {{ s().settings.radiusEnd }} m</b></li>
             <li>Rétrécit : <b>toutes les {{ s().settings.shrinkEvery }} min</b></li>
+            <li>Actualisation cercle : <b>{{ s().settings.circleRefreshSec ? 'Toutes les ' + s().settings.circleRefreshSec + ' s' : 'Au bord / rétrécissement' }}</b></li>
             <li>Rôles : <b>{{ s().settings.roleMode === 'random' ? 'Aléatoire (' + s().settings.hunters + ' chasseur' + (s().settings.hunters > 1 ? 's' : '') + ')' : "Choisis par l'hôte" }}</b></li>
             <li>Zone : <b>{{ s().settings.zone ? 'Rayon ' + s().settings.zone!.r + ' m (' + (s().settings.outGraceSec ?? 30) + ' s max dehors)' : 'Illimitée' }}</b></li>
           </ul>

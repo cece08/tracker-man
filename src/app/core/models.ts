@@ -19,6 +19,7 @@ export interface Settings {
   hunters: number;      // nombre de chasseurs en mode aléatoire
   zone?: Zone | null;   // zone autorisée (optionnelle)
   outGraceSec?: number; // secondes autorisées hors zone avant élimination
+  circleRefreshSec?: number | null; // actualisation périodique du cercle en secondes (null = uniquement si sortie/rétrécissement)
 }
 
 export interface Session {
@@ -78,4 +79,5 @@ export const DEFAULT_SETTINGS: Settings = {
   hunters: 1,
   zone: null,
   outGraceSec: 30,
+  circleRefreshSec: null,
 };
