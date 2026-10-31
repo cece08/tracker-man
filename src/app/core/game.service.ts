@@ -120,11 +120,28 @@ export class GameService {
     });
 
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible' && this.code()) {
+      if (document.visibilityState === 'hidden' && this.playing) {
+        vibrate([300, 100, 300]);
+        this.notifyBackgroundWarning();
+      } else if (document.visibilityState === 'visible' && this.code()) {
         this.refresh();
-        if (this.playing) this.requestWakeLock();
+        if (this.playing) {
+          this.requestWakeLock();
+          this.toast.show('⚠️ Garde l’écran allumé (ou utilise le 🌙 Mode poche) pour ne pas couper le GPS !', 4500);
+        }
       }
     });
+  }
+
+  private notifyBackgroundWarning() {
+    try {
+      if ('Notification' in window && Notification.permission === 'granted') {
+        new Notification('⚠️ Tracker Man : GPS en pause !', {
+          body: 'Rallume l’écran et utilise le 🌙 Mode poche avant de ranger ton téléphone.',
+          tag: 'tm-bg-warn',
+        });
+      }
+    } catch { /* non supporté */ }
   }
 
   serverNow() { return Date.now() + this.offset; }
@@ -449,6 +466,11 @@ export class GameService {
     this.lastTrackSample = 0;
     this.trackFlushed = false;
     this.requestWakeLock();
+    try {
+      if ('Notification' in window && Notification.permission === 'default') {
+        Notification.requestPermission().catch(() => {});
+      }
+    } catch { /* ignore */ }
     if (!('geolocation' in navigator)) {
       this.gpsError.set('GPS non disponible sur cet appareil');
       return;

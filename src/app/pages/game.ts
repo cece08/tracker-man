@@ -52,12 +52,46 @@ interface OtherLayer { circle?: L.Circle; marker?: L.Marker; }
         </div>
         <div class="hud-actions">
           <button class="btn icon light" title="Recentrer" (click)="recenter()">◎</button>
+          <button class="btn icon dark-icon" title="Mode poche (écran noir)" (click)="enablePocketMode()">🌙</button>
           <button class="btn secondary" (click)="showPlayers.set(true)">👥 {{ game.alive().length }} chassé{{ game.alive().length > 1 ? 's' : '' }}</button>
           @if (!isHunter()) {
             <button class="btn danger" (click)="openCaught()">🙋 J'ai été trouvé</button>
           }
         </div>
       </div>
+
+      @if (showKeepOnNotice()) {
+        <div class="modal" (click)="showKeepOnNotice.set(false)">
+          <div class="modal-box" (click)="$event.stopPropagation()">
+            <h3>⚠️ Ne verrouille pas ton téléphone !</h3>
+            <p class="hint" style="font-size:14px; line-height:1.45">
+              Sur téléphone, appuyer sur le bouton Power ou quitter l'application <b>coupe le GPS</b>.
+            </p>
+            <p class="hint" style="font-size:14px; line-height:1.45">
+              👉 Garde cette page ouverte : l'écran ne se mettra pas en veille tout seul.<br>
+              👉 Pour mettre ton téléphone dans ta poche sans vider la batterie ni faire de faux clics, appuie sur le bouton <b>🌙 Mode poche</b> en bas à gauche.
+            </p>
+            <div class="modal-actions">
+              <button class="btn secondary" (click)="showKeepOnNotice.set(false); enablePocketMode()">🌙 Activer le mode poche</button>
+              <button class="btn primary" (click)="showKeepOnNotice.set(false)">J'ai compris</button>
+            </div>
+          </div>
+        </div>
+      }
+
+      @if (pocketMode()) {
+        <div class="pocket-overlay" (click)="onPocketTap()">
+          <div class="pocket-content">
+            <div class="pocket-icon">🌙</div>
+            <div class="pocket-role">{{ isHunter() ? 'Chasseur 🔴' : 'Chassé 🟢' }} — {{ fmt(game.remaining()) }}</div>
+            <div class="pocket-gps">📡 GPS actif — ne verrouille pas le téléphone</div>
+            @if (game.outOfZoneRemaining(); as rem) {
+              <div class="zone-alert" style="margin-top:12px">⚠️ HORS ZONE — {{ fmt(rem) }}</div>
+            }
+            <div class="pocket-unlock">Touche 2 fois rapidement l'écran pour déverrouiller</div>
+          </div>
+        </div>
+      }
 
       @if (showCaught()) {
         <div class="modal" (click)="showCaught.set(false)">
@@ -126,9 +160,12 @@ export class GameView implements AfterViewInit, OnDestroy {
 
   readonly showCaught = signal(false);
   readonly showPlayers = signal(false);
+  readonly showKeepOnNotice = signal(true);
+  readonly pocketMode = signal(false);
   readonly catchCode = signal('');
   readonly catchError = signal<string | null>(null);
   readonly busy = signal(false);
+  private lastPocketTap = 0;
 
   private map?: L.Map;
   private ready = signal(false);
@@ -274,6 +311,22 @@ export class GameView implements AfterViewInit, OnDestroy {
     }
     if (pts.length > 1) this.map?.fitBounds(L.latLngBounds(pts), { padding: [40, 40], maxZoom: 17 });
     else if (pts.length === 1) this.map?.setView(pts[0], 16);
+  }
+
+  enablePocketMode() {
+    this.pocketMode.set(true);
+    this.lastPocketTap = 0;
+  }
+
+  onPocketTap() {
+    const now = Date.now();
+    if (now - this.lastPocketTap < 400) {
+      this.pocketMode.set(false);
+      this.lastPocketTap = 0;
+      vibrate(60);
+    } else {
+      this.lastPocketTap = now;
+    }
   }
 
   openCaught() {

@@ -57,6 +57,14 @@ import { Player } from '../core/models';
         } @else {
           <p class="hint center">En attente du lancement par l'hôte…</p>
         }
+
+        <div class="card warn-card">
+          <b>⚠️ Important pendant la partie</b>
+          <p class="hint">
+            Ne verrouille <b>jamais</b> ton téléphone avec le bouton Power (cela coupe le GPS sur navigateur).
+            L'application garde l'écran allumé toute seule : utilise le bouton <b>🌙 Mode poche</b> en jeu pour éteindre l'affichage dans ta poche sans couper la localisation.
+          </p>
+        </div>
       </div>
     </section>
   `,

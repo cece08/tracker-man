@@ -83,6 +83,7 @@ code { background: #0003; padding: 1px 5px; border-radius: 4px; }
 .btn.ghost { background: transparent; border: 1px solid var(--border); }
 .btn.icon { width: 42px; height: 42px; padding: 0; font-size: 20px; background: transparent; }
 .btn.icon.light { background: #fff; color: #111; border-radius: 50%; box-shadow: 0 2px 10px #0006; }
+.btn.icon.dark-icon { background: #1d2129; color: #ffd46b; border: 1px solid var(--border); border-radius: 50%; box-shadow: 0 2px 10px #0006; }
 
 /* Écrans internes */
 .topbar {
@@ -180,6 +181,21 @@ code { background: #0003; padding: 1px 5px; border-radius: 4px; }
 .end-title.hunter { color: var(--hunter); }
 
 /* Zone autorisée (création + alerte en jeu) */
+.warn-card { border-color: #ff8a3d66; background: #261d17; }
+.warn-card b { color: var(--primary2); font-size: 14px; }
+.pocket-overlay {
+  position: fixed; inset: 0; z-index: 2800; background: #000;
+  display: flex; align-items: center; justify-content: center;
+  user-select: none; touch-action: manipulation;
+}
+.pocket-content {
+  text-align: center; color: #4a5060; padding: 24px;
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+}
+.pocket-icon { font-size: 36px; opacity: 0.45; }
+.pocket-role { font-size: 16px; font-weight: 700; color: #687086; font-variant-numeric: tabular-nums; }
+.pocket-gps { font-size: 12px; color: #3d4455; }
+.pocket-unlock { margin-top: 24px; font-size: 12px; color: #363c4b; border: 1px dashed #252932; padding: 8px 14px; border-radius: 99px; }
 .zone-map-wrap { position: relative; margin: 10px 0; border-radius: 12px; overflow: hidden; border: 1px solid var(--border); }
 .zone-map { height: 240px; width: 100%; background: #1b1f27; }
 .zone-gps-btn { position: absolute; z-index: 800; right: 10px; bottom: 10px; box-shadow: 0 2px 10px #0009; }
