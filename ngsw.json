@@ -1,0 +1,85 @@
+{
+  "configVersion": 1,
+  "timestamp": 1793481919093,
+  "index": "/tracker-man/index.html",
+  "assetGroups": [
+    {
+      "name": "app",
+      "installMode": "prefetch",
+      "updateMode": "prefetch",
+      "cacheQueryOptions": {
+        "ignoreVary": true
+      },
+      "urls": [
+        "/tracker-man/favicon.ico",
+        "/tracker-man/index.html",
+        "/tracker-man/main-KRGPEBSZ.js",
+        "/tracker-man/manifest.webmanifest",
+        "/tracker-man/styles-G47F6YCV.css"
+      ],
+      "patterns": []
+    },
+    {
+      "name": "assets",
+      "installMode": "lazy",
+      "updateMode": "prefetch",
+      "cacheQueryOptions": {
+        "ignoreVary": true
+      },
+      "urls": [
+        "/tracker-man/icons/icon-128x128.png",
+        "/tracker-man/icons/icon-144x144.png",
+        "/tracker-man/icons/icon-152x152.png",
+        "/tracker-man/icons/icon-192x192.png",
+        "/tracker-man/icons/icon-384x384.png",
+        "/tracker-man/icons/icon-512x512.png",
+        "/tracker-man/icons/icon-72x72.png",
+        "/tracker-man/icons/icon-96x96.png",
+        "/tracker-man/icons/icon-maskable-512x512.png",
+        "/tracker-man/media/layers-2x-TBM42ERR.png",
+        "/tracker-man/media/layers-55W3Q4RM.png",
+        "/tracker-man/media/marker-icon-2V3QKKVC.png"
+      ],
+      "patterns": []
+    }
+  ],
+  "dataGroups": [],
+  "hashTable": {
+    "/tracker-man/favicon.ico": "9c39f434fe1261f68c5e3eefdf734630d99c5670",
+    "/tracker-man/icons/icon-128x128.png": "c85b840b9c20e0820da3b0a14f3ab98dd67861e5",
+    "/tracker-man/icons/icon-144x144.png": "4e87e5db7b3a5b53b3deeb3ba55e526b56a1f1fc",
+    "/tracker-man/icons/icon-152x152.png": "19d53ad396ceddf4ba54cd48781e12355e658b4c",
+    "/tracker-man/icons/icon-192x192.png": "11b13b3c5f15d27b43dfdb57746c61914bbe0bf9",
+    "/tracker-man/icons/icon-384x384.png": "0a6a6fd300b84e7093047ed0750e5758c7e1f6f4",
+    "/tracker-man/icons/icon-512x512.png": "f472be05fb3129395cdc5bb583703593b3fe5880",
+    "/tracker-man/icons/icon-72x72.png": "abbf3bffa8caf583516ad947100969e02e370bab",
+    "/tracker-man/icons/icon-96x96.png": "e7d42749a9b3699be25fee4ad69591645313843f",
+    "/tracker-man/icons/icon-maskable-512x512.png": "b0d9366b38520e0aedab339e27617ed6466e41c3",
+    "/tracker-man/index.html": "a61a44db28a902d06be95bfa13af22552496255d",
+    "/tracker-man/main-KRGPEBSZ.js": "c1ecb78f26f3d758e8dfd427dc4ecd6cdd17b4b2",
+    "/tracker-man/manifest.webmanifest": "7e6f658b0939513fac7dd120ef5b60d1ef8e3722",
+    "/tracker-man/media/layers-2x-TBM42ERR.png": "152a162333e46d24f9d89f566312fc0c64011dee",
+    "/tracker-man/media/layers-55W3Q4RM.png": "c9e7528e491a39232ba24a2706c6c739d6fb0f06",
+    "/tracker-man/media/marker-icon-2V3QKKVC.png": "60a90bcbb2b42b7ddb4556db94eb7c1084b0e5da",
+    "/tracker-man/styles-G47F6YCV.css": "fe091b751e7b1b4a8158845e03b8223ae624effc"
+  },
+  "navigationUrls": [
+    {
+      "positive": true,
+      "regex": "^\\/.*$"
+    },
+    {
+      "positive": false,
+      "regex": "^\\/(?:.+\\/)?[^/]*\\.[^/]*$"
+    },
+    {
+      "positive": false,
+      "regex": "^\\/(?:.+\\/)?[^/]*__[^/]*$"
+    },
+    {
+      "positive": false,
+      "regex": "^\\/(?:.+\\/)?[^/]*__[^/]*\\/.*$"
+    }
+  ],
+  "navigationRequestStrategy": "performance"
+}
