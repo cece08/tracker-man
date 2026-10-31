@@ -24,7 +24,7 @@ create table if not exists public.players (
   initial_role text,
   catch_code   text not null,
   joined_at    bigint not null,
-  caught_by    text,
+  caught_by    text,    -- ID du chasseur ou 'ZONE' si éliminé hors zone
   caught_at    bigint,
   circle       jsonb,   -- { lat, lng, r, t } : cercle approximatif d'un chassé
   pos          jsonb,   -- { lat, lng, t }    : position exacte d'un chasseur
@@ -35,7 +35,7 @@ create table if not exists public.players (
 create table if not exists public.events (
   id           bigint generated always as identity primary key,
   session_code text not null references public.sessions(code) on delete cascade,
-  type         text not null,
+  type         text not null, -- 'start' | 'caught' | 'out_of_zone' | 'pos'
   t            bigint not null,
   data         jsonb not null default '{}'::jsonb
 );
@@ -175,6 +175,6 @@ begin
    where code = p_code;
 end $$;
 
--- Nettoyage : supprime les sessions de plus de 2 jours (à lancer à la main ou via pg_cron)
+-- Nettoyage : supprime les sessions de plus de 2 jours
 create or replace function public.cleanup_old_sessions() returns void
 language sql as $$ delete from public.sessions where created_at < now() - interval '2 days' $$;

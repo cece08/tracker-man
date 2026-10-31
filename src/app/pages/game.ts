@@ -24,6 +24,12 @@ interface OtherLayer { circle?: L.Circle; marker?: L.Marker; }
           }
           <div><small>Rayon</small><strong>{{ game.shrink().radius }} m</strong></div>
         </div>
+
+        @if (game.outOfZoneRemaining(); as rem) {
+          <div class="zone-alert">
+            ⚠️ HORS ZONE (+{{ game.distanceOutOfZone() }} m) — Rentre avant <b>{{ fmt(rem) }}</b> !
+          </div>
+        }
       </div>
 
       @if (isHunter() && game.inHeadStart()) {
@@ -78,17 +84,22 @@ interface OtherLayer { circle?: L.Circle; marker?: L.Marker; }
                 <li>
                   <span class="dot" [class.on]="game.online().has(p.id)"></span>
                   <span class="name">{{ p.name }}@if (p.id === game.uid) { (toi) }</span>
-                  @if (p.caught_by) { <span class="tag caught">attrapé par {{ game.players()[p.caught_by]?.name ?? '?' }}</span> }
+                  @if (p.caught_by === 'ZONE') {
+                    <span class="tag caught">🚫 hors zone</span>
+                  } @else if (p.caught_by) {
+                    <span class="tag caught">attrapé par {{ game.players()[p.caught_by]?.name ?? '?' }}</span>
+                  }
                   <span class="tag" [class]="p.role">{{ p.role === 'hunter' ? 'Chasseur' : 'Chassé' }}</span>
                 </li>
               }
             </ul>
             <h3>Journal</h3>
             <ul class="log">
-              @for (e of game.events(); track e.id) {
+              @for (e of game.logEvents(); track e.id) {
                 <li><time>{{ clock(e.t) }}</time>
                   @if (e.type === 'start') { Début de la partie }
-                  @else { <b>{{ e.data.victimName }}</b> attrapé par <b>{{ e.data.hunterName }}</b> }
+                  @else if (e.type === 'out_of_zone') { 🚫 <b>{{ e.data.victimName }}</b> éliminé (hors zone) }
+                  @else { 🎯 <b>{{ e.data.victimName }}</b> attrapé par <b>{{ e.data.hunterName }}</b> }
                 </li>
               }
             </ul>
@@ -124,6 +135,7 @@ export class GameView implements AfterViewInit, OnDestroy {
   private meMarker?: L.Marker;
   private meAccuracy?: L.Circle;
   private myCircle?: L.Circle;
+  private zoneCircle?: L.Circle;
   private others = new Map<string, OtherLayer>();
   private centered = false;
 
@@ -154,9 +166,26 @@ export class GameView implements AfterViewInit, OnDestroy {
     const now = this.game.now();
     const inHead = this.game.inHeadStart();
     const players = this.game.sortedPlayers();
+    const zone = this.game.session()?.settings.zone;
     if (!me) return;
     const isHunter = me.role === 'hunter';
     const color = isHunter ? '#ff3b3b' : '#3b8bff';
+
+    // Zone autorisée (si configurée)
+    if (zone) {
+      const out = this.game.outOfZoneSince() != null;
+      const zCol = out ? '#ff3b3b' : '#3b8bff';
+      if (!this.zoneCircle) {
+        this.zoneCircle = L.circle([zone.lat, zone.lng], {
+          radius: zone.r, color: zCol, weight: 3, dashArray: '10 6', fillOpacity: 0.04,
+        }).addTo(map).bindTooltip('Zone autorisée', { direction: 'top', className: 'lbl' });
+      } else {
+        this.zoneCircle.setLatLng([zone.lat, zone.lng]).setRadius(zone.r).setStyle({ color: zCol });
+      }
+    } else if (this.zoneCircle) {
+      this.zoneCircle.remove();
+      this.zoneCircle = undefined;
+    }
 
     // Ma position
     if (pos) {
@@ -235,6 +264,10 @@ export class GameView implements AfterViewInit, OnDestroy {
     const pts: L.LatLng[] = [];
     const pos = this.game.myPos();
     if (pos) pts.push(L.latLng(pos.lat, pos.lng));
+    if (this.zoneCircle) {
+      const b = this.zoneCircle.getBounds();
+      pts.push(b.getNorthEast(), b.getSouthWest());
+    }
     for (const o of this.others.values()) {
       if (o.circle) { const b = o.circle.getBounds(); pts.push(b.getNorthEast(), b.getSouthWest()); }
       if (o.marker) pts.push(o.marker.getLatLng());

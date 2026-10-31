@@ -1,7 +1,7 @@
 import { Injectable, computed, effect, inject, signal, untracked } from '@angular/core';
 import { createClient, RealtimeChannel, SupabaseClient } from '@supabase/supabase-js';
 import { SUPABASE_ANON_KEY, SUPABASE_CONFIGURED, SUPABASE_URL } from '../supabase.config';
-import { Circle, GameEvent, Player, Role, Session, Settings } from './models';
+import { Circle, GameEvent, Player, Pos, Role, Session, Settings } from './models';
 import { destPoint, distance, random4, randomCode, vibrate } from './utils';
 import { ToastService } from './toast.service';
 
@@ -51,10 +51,26 @@ export class GameService {
   readonly myPos = signal<MyPos | null>(null);
   readonly gpsError = signal<string | null>(null);
 
+  // Hors zone
+  readonly outOfZoneSince = signal<number | null>(null);
+  readonly outOfZoneRemaining = computed(() => {
+    const since = this.outOfZoneSince();
+    const grace = (this.session()?.settings.outGraceSec ?? 30) * 1000;
+    if (since == null) return null;
+    return Math.max(0, grace - (this.now() - since));
+  });
+  readonly distanceOutOfZone = computed(() => {
+    const z = this.session()?.settings.zone;
+    const pos = this.myPos();
+    if (!z || !pos) return 0;
+    return Math.max(0, Math.round(distance(pos, z) - z.r));
+  });
+
   readonly me = computed(() => this.players()[this.uid] ?? null);
   readonly isHost = computed(() => this.session()?.host_id === this.uid);
   readonly sortedPlayers = computed(() => Object.values(this.players()).sort((a, b) => a.joined_at - b.joined_at));
   readonly alive = computed(() => this.sortedPlayers().filter((p) => p.role === 'hunted'));
+  readonly logEvents = computed(() => this.events().filter((e) => e.type !== 'pos'));
   readonly headStartEnd = computed(() => {
     const s = this.session();
     return s?.start_at != null ? s.start_at + s.settings.headStart * 60000 : 0;
@@ -76,14 +92,25 @@ export class GameService {
   private lastRadius: number | null = null;
   private wasHead: boolean | null = null;
   private ending = false;
+  private eliminatingZone = false;
+  private myTrack: Pos[] = [];
+  private lastTrackSample = 0;
+  private trackFlushed = false;
 
   constructor() {
     setInterval(() => this.now.set(this.serverNow()), 1000);
 
     // Démarre / arrête le GPS selon l'état de la partie
     effect(() => {
-      const playing = this.session()?.status === 'playing' && !!this.me();
-      untracked(() => (playing ? this.startPlaying() : this.stopPlaying()));
+      const status = this.session()?.status;
+      const hasMe = !!this.me();
+      untracked(() => {
+        if (status === 'playing' && hasMe) this.startPlaying();
+        else {
+          if (status === 'ended' && hasMe) this.flushMyTrack();
+          this.stopPlaying();
+        }
+      });
     });
 
     // Boucle de jeu (chaque seconde)
@@ -194,7 +221,10 @@ export class GameService {
   private onSessionUpdate(s: Session) {
     const prev = this.session();
     this.session.set(s);
-    if (prev?.status !== s.status) this.refresh();
+    if (prev?.status !== s.status) {
+      if (s.status === 'ended') this.flushMyTrack();
+      this.refresh();
+    }
   }
 
   private upsertPlayer(p: Player) {
@@ -217,6 +247,10 @@ export class GameService {
       if (e.data.victim === this.uid) this.toast.show('Tu es maintenant chasseur 🔴 !');
       else if (e.data.hunter === this.uid) this.toast.show(`🎯 Tu as attrapé ${e.data.victimName} !`);
       else this.toast.show(`🎯 ${e.data.victimName} a été attrapé par ${e.data.hunterName}`);
+    } else if (e.type === 'out_of_zone') {
+      vibrate([300, 100, 300]);
+      if (e.data.victim === this.uid) this.toast.show('🚫 Éliminé hors zone ! Tu deviens chasseur 🔴');
+      else this.toast.show(`🚫 ${e.data.victimName} a été éliminé (hors zone)`);
     } else if (e.type === 'start') {
       vibrate(300);
     }
@@ -297,7 +331,7 @@ export class GameService {
   }
 
   // =================================================================
-  // Boucle de jeu
+  // Boucle de jeu & Zone autorisée & Trajectoire
   // =================================================================
   private tick() {
     const s = this.session();
@@ -319,8 +353,66 @@ export class GameService {
     this.lastRadius = radius;
     this.wasHead = inHead;
 
+    this.checkZone(s);
     this.publishPosition();
     this.checkEnd(s);
+  }
+
+  /** Vérifie si le joueur est en dehors de la zone autorisée et applique le compte à rebours d'élimination. */
+  private checkZone(s: Session) {
+    const z = s.settings.zone;
+    const pos = this.myPos();
+    const m = this.me();
+    if (!z || !pos || !m || m.role !== 'hunted') {
+      if (this.outOfZoneSince() != null) this.outOfZoneSince.set(null);
+      return;
+    }
+    const d = distance(pos, z);
+    if (d <= z.r) {
+      if (this.outOfZoneSince() != null) {
+        this.outOfZoneSince.set(null);
+        this.toast.show('✅ De retour dans la zone autorisée !');
+      }
+      return;
+    }
+    // Le joueur est hors de la zone
+    let since = this.outOfZoneSince();
+    if (since == null) {
+      since = this.now();
+      this.outOfZoneSince.set(since);
+      vibrate([250, 100, 250]);
+      this.toast.show(`⚠️ Hors zone ! Rentre vite (${s.settings.outGraceSec ?? 30} s)`);
+    }
+    const graceMs = (s.settings.outGraceSec ?? 30) * 1000;
+    if (this.now() - since >= graceMs && !this.eliminatingZone) {
+      this.eliminateOutOfZone();
+    }
+  }
+
+  private async eliminateOutOfZone() {
+    const code = this.code();
+    const m = this.me();
+    if (!code || !m || m.role !== 'hunted' || !this.sb) return;
+    this.eliminatingZone = true;
+    const t = this.serverNow();
+    try {
+      await this.sb.from('players').update({
+        role: 'hunter',
+        caught_by: 'ZONE',
+        caught_at: t,
+        circle: null,
+      }).eq('session_code', code).eq('id', this.uid);
+      await this.sb.from('events').insert({
+        session_code: code,
+        type: 'out_of_zone',
+        t,
+        data: { victim: this.uid, victimName: m.name },
+      });
+      this.outOfZoneSince.set(null);
+      this.lastCircle = null;
+    } finally {
+      this.eliminatingZone = false;
+    }
   }
 
   /** Si l'hôte est hors ligne, le premier joueur connecté devient hôte. */
@@ -351,6 +443,11 @@ export class GameService {
     this.lastPosWrite = 0;
     this.lastSeenWrite = 0;
     this.ending = false;
+    this.eliminatingZone = false;
+    this.outOfZoneSince.set(null);
+    this.myTrack = this.loadLocalTrack();
+    this.lastTrackSample = 0;
+    this.trackFlushed = false;
     this.requestWakeLock();
     if (!('geolocation' in navigator)) {
       this.gpsError.set('GPS non disponible sur cet appareil');
@@ -360,6 +457,7 @@ export class GameService {
       (p) => {
         this.gpsError.set(null);
         this.myPos.set({ lat: p.coords.latitude, lng: p.coords.longitude, acc: Math.round(p.coords.accuracy) });
+        this.sampleMyTrack();
         this.publishPosition();
       },
       (err) => this.gpsError.set(err.code === 1
@@ -372,10 +470,63 @@ export class GameService {
   private stopPlaying() {
     if (!this.playing) return;
     this.playing = false;
+    this.outOfZoneSince.set(null);
     if (this.watchId != null) navigator.geolocation.clearWatch(this.watchId);
     this.watchId = null;
     this.wakeLock?.release().catch(() => {});
     this.wakeLock = null;
+  }
+
+  /** Enregistre localement un point GPS toutes les 6 s (ou dès 8 m de déplacement) pour le récap de fin. */
+  private sampleMyTrack() {
+    const pos = this.myPos(), m = this.me();
+    if (!pos || !m || this.session()?.status !== 'playing') return;
+    const t = this.serverNow();
+    const last = this.myTrack[this.myTrack.length - 1];
+    if (last && t - this.lastTrackSample < 6000 && distance(pos, last) < 8) return;
+    this.lastTrackSample = t;
+    this.myTrack.push({
+      lat: Number(pos.lat.toFixed(6)),
+      lng: Number(pos.lng.toFixed(6)),
+      t,
+      role: m.role,
+    });
+    try {
+      localStorage.setItem(`tm_track_${this.code()}_${this.session()?.start_at}`, JSON.stringify(this.myTrack));
+    } catch { /* quota */ }
+  }
+
+  private loadLocalTrack(): Pos[] {
+    try {
+      const raw = localStorage.getItem(`tm_track_${this.code()}_${this.session()?.start_at}`);
+      return raw ? (JSON.parse(raw) as Pos[]) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * À la fin de la partie seulement, chaque joueur envoie sa trajectoire complète dans `events`
+   * pour que l'écran de fin puisse afficher le parcours exact de tout le monde (sans jamais
+   * révéler la position exacte des chassés pendant la partie).
+   */
+  private async flushMyTrack() {
+    if (this.trackFlushed || !this.sb) return;
+    const code = this.code(), m = this.me();
+    if (!code || !m) return;
+    if (!this.myTrack.length) this.myTrack = this.loadLocalTrack();
+    if (!this.myTrack.length) return;
+    this.trackFlushed = true;
+    // Évite les doublons si déjà envoyé
+    if (this.events().some((e) => e.type === 'pos' && e.data.playerId === this.uid)) return;
+    const rows = this.myTrack.map((pt) => ({
+      session_code: code,
+      type: 'pos',
+      t: pt.t,
+      data: { playerId: this.uid, playerName: m.name, lat: pt.lat, lng: pt.lng, role: pt.role },
+    }));
+    await this.sb.from('events').insert(rows);
+    try { localStorage.removeItem(`tm_track_${code}_${this.session()?.start_at}`); } catch { /* ignore */ }
   }
 
   private updateMe(values: Partial<Player>) {
@@ -388,6 +539,7 @@ export class GameService {
   private publishPosition() {
     const m = this.me(), pos = this.myPos();
     if (!m || !pos || this.session()?.status !== 'playing') return;
+    this.sampleMyTrack();
     const t = this.serverNow();
     if (m.role === 'hunter') {
       if (t - this.lastPosWrite > 4000) {
@@ -406,7 +558,7 @@ export class GameService {
   /**
    * Cercle d'un chassé : son centre est décalé aléatoirement, la vraie position est toujours dedans.
    * Il est régénéré quand le chassé approche du bord ou quand le rayon rétrécit.
-   * La position exacte d'un chassé n'est jamais envoyée.
+   * La position exacte d'un chassé n'est jamais envoyée pendant la partie.
    */
   private maybeUpdateCircle(pos: MyPos) {
     const m = this.me();

@@ -27,6 +27,7 @@ import { Player } from '../core/models';
             <li>Rayon : <b>{{ s().settings.radiusStart }} → {{ s().settings.radiusEnd }} m</b></li>
             <li>Rétrécit : <b>toutes les {{ s().settings.shrinkEvery }} min</b></li>
             <li>Rôles : <b>{{ s().settings.roleMode === 'random' ? 'Aléatoire (' + s().settings.hunters + ' chasseur' + (s().settings.hunters > 1 ? 's' : '') + ')' : "Choisis par l'hôte" }}</b></li>
+            <li>Zone : <b>{{ s().settings.zone ? 'Rayon ' + s().settings.zone!.r + ' m (' + (s().settings.outGraceSec ?? 30) + ' s max dehors)' : 'Illimitée' }}</b></li>
           </ul>
         </div>
 

@@ -179,6 +179,54 @@ code { background: #0003; padding: 1px 5px; border-radius: 4px; }
 .end-title.hunted { color: var(--hunted); }
 .end-title.hunter { color: var(--hunter); }
 
+/* Zone autorisée (création + alerte en jeu) */
+.zone-map-wrap { position: relative; margin: 10px 0; border-radius: 12px; overflow: hidden; border: 1px solid var(--border); }
+.zone-map { height: 240px; width: 100%; background: #1b1f27; }
+.zone-gps-btn { position: absolute; z-index: 800; right: 10px; bottom: 10px; box-shadow: 0 2px 10px #0009; }
+.zone-alert {
+  background: var(--hunter); color: #fff; padding: 8px 14px; border-radius: 10px;
+  font-size: 14px; text-align: center; box-shadow: 0 4px 16px #000a;
+  animation: pulse-alert 0.9s ease-in-out infinite alternate;
+}
+@keyframes pulse-alert { from { transform: scale(1); } to { transform: scale(1.03); } }
+
+/* Écran de fin détaillé & Trajectoires */
+.stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.stat-box {
+  background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+  padding: 10px 8px; display: flex; flex-direction: column; align-items: center; gap: 2px;
+}
+.stat-box small { color: var(--muted); font-size: 11px; text-transform: uppercase; }
+.stat-box strong { font-size: 18px; font-variant-numeric: tabular-nums; }
+.row-between { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.row-between h3 { margin: 0; }
+.filter-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px;
+  border-radius: 99px; border: 1px solid var(--border); background: var(--bg2);
+  font-size: 13px; cursor: pointer;
+}
+.chip.active { background: var(--primary); border-color: var(--primary); color: #fff; font-weight: 600; }
+.swatch { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; }
+.swatch.big { width: 14px; height: 14px; }
+.recap-map { height: 320px; width: 100%; border-radius: 12px; overflow: hidden; border: 1px solid var(--border); background: #1b1f27; }
+
+.player-reports { display: flex; flex-direction: column; gap: 8px; }
+.report-item {
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 12px;
+  padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; cursor: pointer;
+}
+.report-head { display: flex; align-items: center; gap: 8px; }
+.report-head .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.report-metrics { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; color: var(--muted); }
+.report-metrics b { color: var(--text); }
+.timeline li { display: flex; flex-direction: column; gap: 2px; padding: 6px 0; border-bottom: 1px solid var(--border); }
+.timeline li:last-child { border-bottom: none; }
+.catch-pin {
+  width: 26px; height: 26px; border-radius: 50%; background: #171a21; border: 2px solid #fff;
+  display: flex; align-items: center; justify-content: center; font-size: 14px; box-shadow: 0 2px 8px #000a;
+}
+
 /* Marqueurs Leaflet */
 .me-marker { width: 18px; height: 18px; border-radius: 50%; border: 3px solid #fff; box-shadow: 0 0 0 4px #3b8bff55, 0 2px 6px #0008; }
 .mate-marker { width: 14px; height: 14px; border-radius: 50%; background: var(--hunter); border: 2px solid #fff; }
