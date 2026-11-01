@@ -249,7 +249,7 @@ export class GameService {
   }
 
   private removePlayer(id: string) {
-    if (id === this.uid) return this.handleGone('Tu as été retiré de la session.');
+    if (id === this.uid) return this.handleGone("Tu as été exclu de la session par l'hôte.");
     this.players.update((m) => {
       const { [id]: _removed, ...rest } = m;
       return rest;
@@ -315,6 +315,29 @@ export class GameService {
   async toggleRole(p: Player) {
     const role: Role = p.role === 'hunter' ? 'hunted' : 'hunter';
     await this.client().from('players').update({ role }).eq('session_code', p.session_code).eq('id', p.id);
+  }
+
+  async updateSettings(settings: Settings) {
+    const code = this.code();
+    if (!code) return;
+    const { error } = await this.client().from('sessions').update({ settings }).eq('code', code);
+    if (error) throw new Error(error.message);
+  }
+
+  async renamePlayer(playerId: string, newName: string) {
+    const code = this.code();
+    const name = newName.trim().slice(0, 20);
+    if (!code || !name) throw new Error('Le pseudo ne peut pas être vide.');
+    const { error } = await this.client().from('players').update({ name }).eq('session_code', code).eq('id', playerId);
+    if (error) throw new Error(error.message);
+    if (playerId === this.uid) localStorage.setItem('tm_name', name);
+  }
+
+  async kickPlayer(playerId: string) {
+    const code = this.code();
+    if (!code || playerId === this.uid) return;
+    const { error } = await this.client().from('players').delete().eq('session_code', code).eq('id', playerId);
+    if (error) throw new Error(error.message);
   }
 
   async start() {

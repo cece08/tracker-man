@@ -120,9 +120,24 @@ code { background: #0003; padding: 1px 5px; border-radius: 4px; }
 .players li.clickable { cursor: pointer; }
 .players .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .players .tag { font-size: 12px; padding: 3px 8px; border-radius: 99px; background: #333a48; color: var(--muted); }
+.players .tag.clickable { cursor: pointer; }
 .players .tag.hunter { background: #ff3b3b33; color: #ff7b7b; }
 .players .tag.hunted { background: #2fd17a33; color: #5fe39a; }
 .players .tag.caught { background: #ff8a3d33; color: var(--primary2); }
+.mini-btn {
+  width: 28px; height: 28px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--card); cursor: pointer; display: inline-flex; align-items: center;
+  justify-content: center; font-size: 13px; padding: 0; flex: none;
+}
+.mini-btn.danger { border-color: #ff3b3b55; background: #ff3b3b1f; }
+.settings-editor { display: flex; flex-direction: column; gap: 14px; }
+.lbl-with-help { display: inline-flex; align-items: center; gap: 6px; }
+.help-btn {
+  width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--border);
+  background: var(--bg2); color: var(--primary2); font-size: 12px; font-weight: 800;
+  display: inline-flex; align-items: center; justify-content: center; cursor: pointer; padding: 0; flex: none;
+}
+.help-btn:hover { background: var(--primary); color: #fff; border-color: var(--primary); }
 .dot { width: 9px; height: 9px; border-radius: 50%; background: #555; flex: none; }
 .dot.on { background: var(--hunted); box-shadow: 0 0 6px var(--hunted); }
 

@@ -2,10 +2,12 @@ import { Component, computed, inject, signal } from '@angular/core';
 import { Router } from '@angular/router';
 import { GameService } from '../core/game.service';
 import { ToastService } from '../core/toast.service';
-import { Player } from '../core/models';
+import { Player, Settings } from '../core/models';
+import { SettingsEditor } from './settings-editor';
 
 @Component({
   selector: 'app-lobby',
+  imports: [SettingsEditor],
   template: `
     <section class="screen">
       <header class="topbar">
@@ -20,7 +22,12 @@ import { Player } from '../core/models';
         </div>
 
         <div class="card">
-          <h3>Paramètres</h3>
+          <div class="row-between" style="margin-bottom: 10px">
+            <h3>Paramètres</h3>
+            @if (game.isHost()) {
+              <button class="btn ghost small" (click)="editingSettings.set(true)">⚙️ Modifier</button>
+            }
+          </div>
           <ul class="settings-list">
             <li>Durée : <b>{{ s().settings.total }} min</b></li>
             <li>Avance : <b>{{ s().settings.headStart }} min</b></li>
@@ -34,14 +41,26 @@ import { Player } from '../core/models';
 
         <div class="card">
           <h3>Joueurs ({{ game.sortedPlayers().length }})</h3>
-          @if (manual() && game.isHost()) { <p class="hint">Touche un joueur pour changer son rôle.</p> }
+          @if (manual() && game.isHost()) {
+            <p class="hint">Touche le badge « Chasseur / Chassé » d'un joueur pour changer son rôle.</p>
+          }
           <ul class="players">
             @for (p of game.sortedPlayers(); track p.id) {
-              <li [class.clickable]="manual() && game.isHost()" (click)="toggle(p)">
+              <li>
                 <span class="dot" [class.on]="game.online().has(p.id)"></span>
                 <span class="name">{{ p.name }}@if (p.id === s().host_id) { 👑 }@if (p.id === game.uid) { (toi) }</span>
+
+                @if (game.isHost() || p.id === game.uid) {
+                  <button type="button" class="mini-btn" title="Modifier le pseudo" (click)="openRename(p, $event)">✏️</button>
+                }
+                @if (game.isHost() && p.id !== game.uid) {
+                  <button type="button" class="mini-btn danger" title="Exclure ce joueur" (click)="kick(p, $event)">👢</button>
+                }
+
                 @if (manual()) {
-                  <span class="tag" [class]="p.role">{{ p.role === 'hunter' ? 'Chasseur' : 'Chassé' }}</span>
+                  <span class="tag" [class]="p.role" [class.clickable]="game.isHost()" (click)="toggle(p)">
+                    {{ p.role === 'hunter' ? 'Chasseur' : 'Chassé' }}
+                  </span>
                 } @else {
                   <span class="tag">?</span>
                 }
@@ -66,6 +85,39 @@ import { Player } from '../core/models';
           </p>
         </div>
       </div>
+
+      <!-- Modale : modifier les réglages de la session -->
+      @if (editingSettings()) {
+        <div class="modal" (click)="editingSettings.set(false)">
+          <div class="modal-box" (click)="$event.stopPropagation()">
+            <div class="row-between">
+              <h3>⚙️ Modifier les paramètres</h3>
+              <button type="button" class="btn icon" (click)="editingSettings.set(false)">✕</button>
+            </div>
+            <app-settings-editor
+              [initial]="s().settings"
+              submitLabel="💾 Enregistrer les réglages"
+              [busy]="busy()"
+              (save)="saveSettings($event)" />
+          </div>
+        </div>
+      }
+
+      <!-- Modale : renommer un joueur -->
+      @if (renamingPlayer(); as rp) {
+        <div class="modal" (click)="renamingPlayer.set(null)">
+          <div class="modal-box" (click)="$event.stopPropagation()">
+            <h3>✏️ Modifier le pseudo</h3>
+            <input type="text" maxlength="20" [value]="renameValue()"
+                   (input)="renameValue.set($any($event.target).value)"
+                   (keyup.enter)="confirmRename()" />
+            <div class="modal-actions">
+              <button type="button" class="btn ghost" (click)="renamingPlayer.set(null)">Annuler</button>
+              <button type="button" class="btn primary" [disabled]="busy()" (click)="confirmRename()">Enregistrer</button>
+            </div>
+          </div>
+        </div>
+      }
     </section>
   `,
 })
@@ -77,9 +129,57 @@ export class LobbyView {
   readonly s = computed(() => this.game.session()!);
   readonly manual = computed(() => this.s().settings.roleMode === 'manual');
   readonly busy = signal(false);
+  readonly editingSettings = signal(false);
+  readonly renamingPlayer = signal<Player | null>(null);
+  readonly renameValue = signal('');
 
   toggle(p: Player) {
     if (this.manual() && this.game.isHost()) this.game.toggleRole(p);
+  }
+
+  async saveSettings(settings: Settings) {
+    this.busy.set(true);
+    try {
+      await this.game.updateSettings(settings);
+      this.editingSettings.set(false);
+      this.toast.show('✅ Paramètres mis à jour !');
+    } catch (e) {
+      this.toast.show((e as Error).message);
+    } finally {
+      this.busy.set(false);
+    }
+  }
+
+  openRename(p: Player, e: Event) {
+    e.stopPropagation();
+    this.renamingPlayer.set(p);
+    this.renameValue.set(p.name);
+  }
+
+  async confirmRename() {
+    const p = this.renamingPlayer();
+    if (!p) return;
+    this.busy.set(true);
+    try {
+      await this.game.renamePlayer(p.id, this.renameValue());
+      this.renamingPlayer.set(null);
+      this.toast.show('✅ Pseudo modifié');
+    } catch (e) {
+      this.toast.show((e as Error).message);
+    } finally {
+      this.busy.set(false);
+    }
+  }
+
+  async kick(p: Player, e: Event) {
+    e.stopPropagation();
+    if (!confirm(`Exclure ${p.name} du salon ?`)) return;
+    try {
+      await this.game.kickPlayer(p.id);
+      this.toast.show(`👢 ${p.name} a été exclu.`);
+    } catch (err) {
+      this.toast.show((err as Error).message);
+    }
   }
 
   async start() {
