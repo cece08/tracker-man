@@ -1,7 +1,7 @@
 {
   "name": "Tracker Man",
   "short_name": "Tracker Man",
-  "description": "Chasse à l'homme GPS en temps réel",
+  "description": "Le cache-cache géant grandeur nature au radar GPS entre amis",
   "display": "standalone",
   "orientation": "portrait",
   "background_color": "#0f1115",
