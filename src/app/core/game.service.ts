@@ -31,6 +31,18 @@ function getUid(): string {
   return uid;
 }
 
+/** Jeton secret 256 bits propre à l'appareil : stocké uniquement en local, son hash SHA-256 est vérifié côté serveur. */
+function getSecret(): string {
+  let sec = localStorage.getItem('tm_secret');
+  if (!sec || sec.length < 32) {
+    const bytes = new Uint8Array(32);
+    crypto.getRandomValues(bytes);
+    sec = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+    localStorage.setItem('tm_secret', sec);
+  }
+  return sec;
+}
+
 @Injectable({ providedIn: 'root' })
 export class GameService {
   private toast = inject(ToastService);
@@ -38,6 +50,7 @@ export class GameService {
   readonly configured = SUPABASE_CONFIGURED;
   private readonly sb: SupabaseClient | null = SUPABASE_CONFIGURED ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
   readonly uid = getUid();
+  private readonly secret = getSecret();
 
   // ---- État réactif ----
   readonly code = signal<string | null>(null);
@@ -50,6 +63,7 @@ export class GameService {
   readonly now = signal(Date.now());
   readonly myPos = signal<MyPos | null>(null);
   readonly gpsError = signal<string | null>(null);
+  readonly myCatchCode = signal<string>('----');
 
   // Hors zone
   readonly outOfZoneSince = signal<number | null>(null);
@@ -96,6 +110,7 @@ export class GameService {
   private myTrack: Pos[] = [];
   private lastTrackSample = 0;
   private trackFlushed = false;
+  private lastValidGps: { lat: number; lng: number; t: number } | null = null;
 
   constructor() {
     setInterval(() => this.now.set(this.serverNow()), 1000);
@@ -226,6 +241,23 @@ export class GameService {
     this.players.set(map);
     this.events.set(e.data as GameEvent[]);
     this.loaded.set(true);
+    this.fetchMyCatchCode(map[this.uid]);
+  }
+
+  /** Récupère le code chasseur privé (depuis `player_secrets` si le schéma sécurisé est actif, sinon depuis la ligne joueur). */
+  private async fetchMyCatchCode(mePlayer?: Player) {
+    const code = this.code();
+    if (!code || !this.sb) return;
+    if (mePlayer?.catch_code && mePlayer.catch_code !== '****') {
+      this.myCatchCode.set(mePlayer.catch_code);
+      return;
+    }
+    const { data, error } = await this.sb.rpc('get_my_catch_code', {
+      p_code: code, p_id: this.uid, p_secret: this.secret,
+    });
+    if (!error && typeof data === 'string' && data) {
+      this.myCatchCode.set(data);
+    }
   }
 
   private handleGone(msg: string) {
@@ -245,7 +277,9 @@ export class GameService {
   }
 
   private upsertPlayer(p: Player) {
+    const prevRole = this.players()[p.id]?.role;
     this.players.update((m) => ({ ...m, [p.id]: p }));
+    if (p.id === this.uid && prevRole !== p.role) this.fetchMyCatchCode(p);
   }
 
   private removePlayer(id: string) {
@@ -282,62 +316,118 @@ export class GameService {
   }
 
   // =================================================================
-  // Actions
+  // Actions (compatibles avec le schéma sécurisé RPC + fallback ancien schéma)
   // =================================================================
   async createSession(name: string, settings: Settings): Promise<string> {
     const sb = this.client();
     let code = '';
     for (let i = 0; i < 8; i++) {
       code = randomCode();
-      const { error } = await sb.from('sessions').insert({ code, host_id: this.uid, status: 'lobby', settings });
-      if (!error) break;
-      if (error.code !== '23505' || i === 7) throw new Error(error.message);
+      const rpc = await sb.rpc('create_session_secure', {
+        p_code: code, p_host_id: this.uid, p_secret: this.secret, p_name: name, p_settings: settings,
+      });
+      if (!rpc.error) return code;
+      // Si la fonction RPC sécurisée n'a pas encore été installée dans Supabase, fallback sur l'insertion classique
+      if (rpc.error.code === 'PGRST202') {
+        const ins = await sb.from('sessions').insert({ code, host_id: this.uid, status: 'lobby', settings });
+        if (!ins.error) {
+          const pl = await sb.from('players').insert({
+            session_code: code, id: this.uid, name, catch_code: random4(), joined_at: Date.now(),
+          });
+          if (pl.error) throw new Error(pl.error.message);
+          return code;
+        }
+        if (ins.error.code !== '23505' || i === 7) throw new Error(ins.error.message);
+      } else if (rpc.error.code !== '23505' || i === 7) {
+        throw new Error(rpc.error.message);
+      }
     }
-    const { error } = await sb.from('players').insert({
-      session_code: code, id: this.uid, name, catch_code: random4(), joined_at: Date.now(),
-    });
-    if (error) throw new Error(error.message);
     return code;
   }
 
   async join(code: string, name: string) {
-    const { error } = await this.client().rpc('join_session', { p_code: code, p_id: this.uid, p_name: name });
-    if (error) throw new Error(error.message);
+    const sb = this.client();
+    const res = await sb.rpc('join_session', {
+      p_code: code, p_id: this.uid, p_name: name, p_secret: this.secret,
+    });
+    if (res.error?.code === 'PGRST202') {
+      const legacy = await sb.rpc('join_session', { p_code: code, p_id: this.uid, p_name: name });
+      if (legacy.error) throw new Error(legacy.error.message);
+      return;
+    }
+    if (res.error) throw new Error(res.error.message);
   }
 
   async leave() {
     const code = this.code();
     this.close();
     localStorage.removeItem('tm_code');
-    if (code) await this.client().rpc('leave_session', { p_code: code, p_id: this.uid });
+    if (!code) return;
+    const sb = this.client();
+    const res = await sb.rpc('leave_session', { p_code: code, p_id: this.uid, p_secret: this.secret });
+    if (res.error?.code === 'PGRST202') {
+      await sb.rpc('leave_session', { p_code: code, p_id: this.uid });
+    }
   }
 
   async toggleRole(p: Player) {
     const role: Role = p.role === 'hunter' ? 'hunted' : 'hunter';
-    await this.client().from('players').update({ role }).eq('session_code', p.session_code).eq('id', p.id);
+    const sb = this.client();
+    const res = await sb.rpc('toggle_role_secure', {
+      p_code: p.session_code, p_host_id: this.uid, p_secret: this.secret, p_target_id: p.id, p_role: role,
+    });
+    if (res.error?.code === 'PGRST202') {
+      await sb.from('players').update({ role }).eq('session_code', p.session_code).eq('id', p.id);
+    } else if (res.error) {
+      throw new Error(res.error.message);
+    }
   }
 
   async updateSettings(settings: Settings) {
     const code = this.code();
     if (!code) return;
-    const { error } = await this.client().from('sessions').update({ settings }).eq('code', code);
-    if (error) throw new Error(error.message);
+    const sb = this.client();
+    const res = await sb.rpc('update_settings_secure', {
+      p_code: code, p_host_id: this.uid, p_secret: this.secret, p_settings: settings,
+    });
+    if (res.error?.code === 'PGRST202') {
+      const { error } = await sb.from('sessions').update({ settings }).eq('code', code);
+      if (error) throw new Error(error.message);
+    } else if (res.error) {
+      throw new Error(res.error.message);
+    }
   }
 
   async renamePlayer(playerId: string, newName: string) {
     const code = this.code();
     const name = newName.trim().slice(0, 20);
     if (!code || !name) throw new Error('Le pseudo ne peut pas être vide.');
-    const { error } = await this.client().from('players').update({ name }).eq('session_code', code).eq('id', playerId);
-    if (error) throw new Error(error.message);
+    const sb = this.client();
+    const res = await sb.rpc('rename_player_secure', {
+      p_code: code, p_actor_id: this.uid, p_secret: this.secret, p_target_id: playerId, p_name: name,
+    });
+    if (res.error?.code === 'PGRST202') {
+      const { error } = await sb.from('players').update({ name }).eq('session_code', code).eq('id', playerId);
+      if (error) throw new Error(error.message);
+    } else if (res.error) {
+      throw new Error(res.error.message);
+    }
     if (playerId === this.uid) localStorage.setItem('tm_name', name);
   }
 
   async kickPlayer(playerId: string) {
     const code = this.code();
     if (!code || playerId === this.uid) return;
-    const { error } = await this.client().from('players').delete().eq('session_code', code).eq('id', playerId);
-    if (error) throw new Error(error.message);
+    const sb = this.client();
+    const res = await sb.rpc('kick_player_secure', {
+      p_code: code, p_host_id: this.uid, p_secret: this.secret, p_target_id: playerId,
+    });
+    if (res.error?.code === 'PGRST202') {
+      const { error } = await sb.from('players').delete().eq('session_code', code).eq('id', playerId);
+      if (error) throw new Error(error.message);
+    } else if (res.error) {
+      throw new Error(res.error.message);
+    }
   }
 
   async start() {
@@ -353,21 +443,46 @@ export class GameService {
       if (!hunters.length) throw new Error('Choisis au moins un chasseur.');
       if (hunters.length === ids.length) throw new Error('Il faut au moins un chassé.');
     }
-    const { error } = await this.client().rpc('start_game', { p_code: s.code, p_hunters: hunters });
-    if (error) throw new Error(error.message);
+    const sb = this.client();
+    const res = await sb.rpc('start_game', {
+      p_code: s.code, p_hunters: hunters, p_host_id: this.uid, p_secret: this.secret,
+    });
+    if (res.error?.code === 'PGRST202') {
+      const legacy = await sb.rpc('start_game', { p_code: s.code, p_hunters: hunters });
+      if (legacy.error) throw new Error(legacy.error.message);
+      return;
+    }
+    if (res.error) throw new Error(res.error.message);
   }
 
   async declareCaught(catchCode: string) {
-    const { error } = await this.client().rpc('catch_player', {
-      p_code: this.code(), p_victim: this.uid, p_catch_code: catchCode,
+    const sb = this.client();
+    const res = await sb.rpc('catch_player', {
+      p_code: this.code(), p_victim: this.uid, p_catch_code: catchCode, p_secret: this.secret,
     });
-    if (error) throw new Error(error.message);
+    if (res.error?.code === 'PGRST202') {
+      const legacy = await sb.rpc('catch_player', {
+        p_code: this.code(), p_victim: this.uid, p_catch_code: catchCode,
+      });
+      if (legacy.error) throw new Error(legacy.error.message);
+      this.lastCircle = null;
+      return;
+    }
+    if (res.error) throw new Error(res.error.message);
     this.lastCircle = null;
   }
 
   async replay() {
-    const { error } = await this.client().rpc('reset_game', { p_code: this.code() });
-    if (error) throw new Error(error.message);
+    const sb = this.client();
+    const res = await sb.rpc('reset_game', {
+      p_code: this.code(), p_host_id: this.uid, p_secret: this.secret,
+    });
+    if (res.error?.code === 'PGRST202') {
+      const legacy = await sb.rpc('reset_game', { p_code: this.code() });
+      if (legacy.error) throw new Error(legacy.error.message);
+      return;
+    }
+    if (res.error) throw new Error(res.error.message);
   }
 
   // =================================================================
@@ -415,7 +530,6 @@ export class GameService {
       }
       return;
     }
-    // Le joueur est hors de la zone
     let since = this.outOfZoneSince();
     if (since == null) {
       since = this.now();
@@ -436,18 +550,17 @@ export class GameService {
     this.eliminatingZone = true;
     const t = this.serverNow();
     try {
-      await this.sb.from('players').update({
-        role: 'hunter',
-        caught_by: 'ZONE',
-        caught_at: t,
-        circle: null,
-      }).eq('session_code', code).eq('id', this.uid);
-      await this.sb.from('events').insert({
-        session_code: code,
-        type: 'out_of_zone',
-        t,
-        data: { victim: this.uid, victimName: m.name },
+      const res = await this.sb.rpc('eliminate_out_of_zone_secure', {
+        p_code: code, p_id: this.uid, p_secret: this.secret,
       });
+      if (res.error?.code === 'PGRST202') {
+        await this.sb.from('players').update({
+          role: 'hunter', caught_by: 'ZONE', caught_at: t, circle: null,
+        }).eq('session_code', code).eq('id', this.uid);
+        await this.sb.from('events').insert({
+          session_code: code, type: 'out_of_zone', t, data: { victim: this.uid, victimName: m.name },
+        });
+      }
       this.outOfZoneSince.set(null);
       this.lastCircle = null;
     } finally {
@@ -461,8 +574,13 @@ export class GameService {
     const online = this.online();
     if (!online.has(this.uid) || online.has(s.host_id)) return;
     const first = this.sortedPlayers().find((p) => online.has(p.id));
-    if (first?.id === this.uid) {
-      this.sb?.from('sessions').update({ host_id: this.uid }).eq('code', s.code).then();
+    if (first?.id === this.uid && this.sb) {
+      this.sb.rpc('claim_host_secure', { p_code: s.code, p_id: this.uid, p_secret: this.secret })
+        .then(({ error }) => {
+          if (error?.code === 'PGRST202') {
+            this.sb?.from('sessions').update({ host_id: this.uid }).eq('code', s.code).then();
+          }
+        });
       this.openedAt = Date.now();
     }
   }
@@ -488,6 +606,8 @@ export class GameService {
     this.myTrack = this.loadLocalTrack();
     this.lastTrackSample = 0;
     this.trackFlushed = false;
+    this.lastValidGps = null;
+    this.fetchMyCatchCode(this.me() ?? undefined);
     this.requestWakeLock();
     try {
       if ('Notification' in window && Notification.permission === 'default') {
@@ -500,8 +620,20 @@ export class GameService {
     }
     this.watchId = navigator.geolocation.watchPosition(
       (p) => {
+        const candidate = { lat: p.coords.latitude, lng: p.coords.longitude, acc: Math.round(p.coords.accuracy) };
+        const now = this.serverNow();
+        // Filtre anti-spoofing / téléportation GPS (> 45 m/s ≈ 162 km/h)
+        if (this.lastValidGps) {
+          const dtSec = Math.max(1, (now - this.lastValidGps.t) / 1000);
+          const dist = distance(this.lastValidGps, candidate);
+          if (dist > 150 && dist / dtSec > 45) {
+            this.gpsError.set('Déplacement GPS anormal ignoré');
+            return;
+          }
+        }
+        this.lastValidGps = { lat: candidate.lat, lng: candidate.lng, t: now };
         this.gpsError.set(null);
-        this.myPos.set({ lat: p.coords.latitude, lng: p.coords.longitude, acc: Math.round(p.coords.accuracy) });
+        this.myPos.set(candidate);
         this.sampleMyTrack();
         this.publishPosition();
       },
@@ -552,8 +684,7 @@ export class GameService {
 
   /**
    * À la fin de la partie seulement, chaque joueur envoie sa trajectoire complète dans `events`
-   * pour que l'écran de fin puisse afficher le parcours exact de tout le monde (sans jamais
-   * révéler la position exacte des chassés pendant la partie).
+   * pour que l'écran de fin puisse afficher le parcours exact de tout le monde.
    */
   private async flushMyTrack() {
     if (this.trackFlushed || !this.sb) return;
@@ -567,21 +698,38 @@ export class GameService {
     if (!this.myTrack.length) return;
     this.trackFlushed = true;
     if (this.events().some((e) => (e.type === 'track' || e.type === 'pos') && e.data.playerId === this.uid)) return;
-    await this.sb.from('events').insert({
-      session_code: code,
-      type: 'track',
-      t: this.serverNow(),
-      data: { playerId: this.uid, playerName: m.name, points: this.myTrack },
+    const res = await this.sb.rpc('submit_track_secure', {
+      p_code: code, p_id: this.uid, p_secret: this.secret, p_points: this.myTrack,
     });
+    if (res.error?.code === 'PGRST202') {
+      await this.sb.from('events').insert({
+        session_code: code,
+        type: 'track',
+        t: this.serverNow(),
+        data: { playerId: this.uid, playerName: m.name, points: this.myTrack },
+      });
+    }
     await this.refresh();
     try { localStorage.removeItem(`tm_track_${code}_${this.session()?.start_at}`); } catch { /* ignore */ }
   }
 
-  private updateMe(values: Partial<Player>) {
+  private updateMe(values: { pos?: Pos | null; circle?: Circle | null; seen?: number | null }) {
     const code = this.code();
     if (!code || !this.sb) return;
-    this.sb.from('players').update(values).eq('session_code', code).eq('id', this.uid)
-      .then(({ error }) => { if (error) console.error(error); });
+    this.sb.rpc('update_my_state', {
+      p_code: code,
+      p_id: this.uid,
+      p_secret: this.secret,
+      p_pos: values.pos ?? null,
+      p_circle: values.circle ?? null,
+      p_seen: values.seen ?? null,
+    }).then(({ error }) => {
+      if (error?.code === 'PGRST202') {
+        this.sb?.from('players').update(values).eq('session_code', code).eq('id', this.uid).then();
+      } else if (error) {
+        console.error(error);
+      }
+    });
   }
 
   private publishPosition() {
@@ -605,8 +753,7 @@ export class GameService {
 
   /**
    * Cercle d'un chassé : son centre est décalé aléatoirement, la vraie position est toujours dedans.
-   * Il est régénéré quand le chassé approche du bord ou quand le rayon rétrécit.
-   * La position exacte d'un chassé n'est jamais envoyée pendant la partie.
+   * Il est régénéré quand le chassé approche du bord, quand le rayon rétrécit ou selon l'intervalle choisi.
    */
   private maybeUpdateCircle(pos: MyPos) {
     const m = this.me();
@@ -621,7 +768,8 @@ export class GameService {
       const center = destPoint(pos, radius * (0.1 + Math.random() * 0.6), Math.random() * 360);
       const circle: Circle = { lat: center.lat, lng: center.lng, r: radius, t: now };
       this.lastCircle = circle;
-      this.updateMe({ circle });
+      this.updateMe({ circle, seen: now });
+      this.lastSeenWrite = now;
     }
   }
 

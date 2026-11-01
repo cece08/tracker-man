@@ -43,7 +43,7 @@ interface OtherLayer { circle?: L.Circle; marker?: L.Marker; }
 
       <div class="hud-bottom">
         @if (isHunter()) {
-          <div class="hunter-code">Ton code chasseur : <strong>{{ me().catch_code }}</strong></div>
+          <div class="hunter-code">Ton code chasseur : <strong>{{ game.myCatchCode() }}</strong></div>
         }
         <div class="gps-status">
           @if (game.gpsError(); as err) { ❌ {{ err }} }
