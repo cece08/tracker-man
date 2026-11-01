@@ -79,16 +79,15 @@ begin
 end $$;
 
 -- ---------- 5. Utilitaires internes ----------
-create extension if not exists pgcrypto;
-
 create or replace function public.now_ms() returns bigint
 language sql volatile as $$ select (extract(epoch from clock_timestamp()) * 1000)::bigint $$;
 
 create or replace function public.server_now() returns bigint
 language sql volatile as $$ select public.now_ms() $$;
 
+-- Utilise la fonction native sha256(bytea) de PostgreSQL (aucune extension pgcrypto requise)
 create or replace function public.hash_secret(p_secret text) returns text
-language sql immutable as $$ select encode(digest(coalesce(p_secret, ''), 'sha256'), 'hex') $$;
+language sql immutable as $$ select encode(sha256(convert_to(coalesce(p_secret, ''), 'UTF8')), 'hex') $$;
 
 -- Vérifie que l'appelant possède bien le secret du joueur p_id dans la session p_code
 create or replace function public.assert_player(p_code text, p_id text, p_secret text) returns void
