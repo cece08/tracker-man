@@ -95,10 +95,15 @@ import { RouterLink } from '@angular/router';
         </div>
 
         <div class="card legal-card">
-          <h3>7. Sous-traitants techniques & Sécurité</h3>
+          <h3>7. Sous-traitants certifiés & Sécurité des données</h3>
+          <p>Vos données sont traitées sur des infrastructures conformes aux normes internationales de sécurité les plus strictes :</p>
           <ul>
-            <li><b>Supabase, Inc. :</b> base de données PostgreSQL et canaux WebSocket Realtime chiffrés en transit (TLS 1.3 / HTTPS) et au repos (AES-256), protégés par des politiques Row Level Security (RLS) en lecture seule et des procédures stockées sécurisées (<code>SECURITY DEFINER</code>).</li>
-            <li><b>Netlify, Inc. & GitHub Pages :</b> hébergement HTTPS sécurisé du code de l'application web.</li>
+            <li>
+              <b>Netlify, Inc. :</b> hébergement web frontend, distribution de contenu (CDN) et fonctions serverless sécurisées (512 2nd Street, Suite 200, San Francisco, CA 94107, États-Unis — <a href="https://www.netlify.com/" target="_blank" rel="noopener">www.netlify.com</a>) avec chiffrement HTTPS/TLS et application des en-têtes de sécurité.
+            </li>
+            <li>
+              <b>Supabase, Inc. :</b> hébergement de la base de données PostgreSQL et des canaux temps réel (970 Toa Payoh North #07-04, Singapour 318992 — <a href="https://www.supabase.com/" target="_blank" rel="noopener">www.supabase.com</a>) avec chiffrement de bout en bout en transit (TLS 1.3 / HTTPS) et au repos (AES-256), protégés par des politiques Row Level Security (RLS) en lecture seule et des procédures stockées sécurisées (<code>SECURITY DEFINER</code>).
+            </li>
           </ul>
         </div>
 

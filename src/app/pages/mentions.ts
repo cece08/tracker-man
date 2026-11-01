@@ -46,20 +46,23 @@ import { RouterLink } from '@angular/router';
 
         <div class="card legal-card">
           <h3>2. Hébergement du site et des données</h3>
-          <p>Conformément à l'article 6-III-1-b de la LCEN, l'hébergement de l'application et de son infrastructure temps réel est assuré par :</p>
+          <p>Conformément à l'article 6-III-1-b de la LCEN, l'hébergement du Site et de ses données est assuré par :</p>
           <ul>
             <li>
-              <b>Hébergement Frontend & Distribution CDN :</b><br>
-              Netlify, Inc. — 512 2nd Street, Suite 200, San Francisco, CA 94107, États-Unis (<a href="https://www.netlify.com" target="_blank" rel="noopener">www.netlify.com</a>)<br>
-              & GitHub, Inc. (GitHub Pages) — 88 Colin P Kelly Jr St, San Francisco, CA 94107, États-Unis (<a href="https://github.com" target="_blank" rel="noopener">github.com</a>)
+              <b>Hébergement Frontend & Fonctions Edge (Serverless) :</b><br>
+              Netlify, Inc.<br>
+              512 2nd Street, Suite 200, San Francisco, CA 94107, États-Unis<br>
+              Site web : <a href="https://www.netlify.com/" target="_blank" rel="noopener">www.netlify.com</a>
             </li>
             <li>
-              <b>Hébergement Base de données & Synchronisation Temps Réel :</b><br>
-              Supabase, Inc. — 970 Toa Payoh North #07-04, Singapour 318992 & Delaware, États-Unis (<a href="https://www.supabase.com" target="_blank" rel="noopener">www.supabase.com</a>)
+              <b>Hébergement Base de données, Authentification & Temps réel sécurisé :</b><br>
+              Supabase, Inc.<br>
+              970 Toa Payoh North #07-04, Singapour 318992 (et Delaware, États-Unis)<br>
+              Site web : <a href="https://www.supabase.com/" target="_blank" rel="noopener">www.supabase.com</a>
             </li>
             <li>
               <b>Fonds cartographiques :</b><br>
-              Contributeurs OpenStreetMap (<a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">openstreetmap.org</a>) via la bibliothèque open-source Leaflet.
+              Contributeurs OpenStreetMap (<a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">www.openstreetmap.org</a>) via la bibliothèque open-source Leaflet.
             </li>
           </ul>
         </div>
