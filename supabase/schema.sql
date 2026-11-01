@@ -123,6 +123,7 @@ create or replace function public.create_session_secure(
 language plpgsql security definer set search_path = public as $$
 declare c text := lpad(floor(random() * 10000)::int::text, 4, '0');
 begin
+  perform public.cleanup_old_sessions();
   if length(coalesce(p_secret, '')) < 16 then raise exception 'Secret trop court'; end if;
   insert into public.sessions(code, host_id, status, settings)
   values (p_code, p_host_id, 'lobby', p_settings);
@@ -141,6 +142,7 @@ create or replace function public.join_session(
 language plpgsql security definer set search_path = public as $$
 declare s record; c text;
 begin
+  perform public.cleanup_old_sessions();
   if length(coalesce(p_secret, '')) < 16 then raise exception 'Secret invalide'; end if;
   select * into s from public.sessions where code = p_code;
   if not found then raise exception 'Session introuvable'; end if;
@@ -170,19 +172,19 @@ begin
   return c;
 end $$;
 
--- Quitter une session (authentifié par son secret)
+-- Quitter une session : si la partie est terminée et que l'hôte quitte, ou s'il ne reste plus personne, tout est supprimé
 create or replace function public.leave_session(p_code text, p_id text, p_secret text default '') returns void
 language plpgsql security definer set search_path = public as $$
 declare s record; next_host text;
 begin
   perform public.assert_player(p_code, p_id, p_secret);
+  select * into s from public.sessions where code = p_code;
   delete from public.player_secrets where session_code = p_code and player_id = p_id;
   delete from public.players where session_code = p_code and id = p_id;
-  select * into s from public.sessions where code = p_code;
   if not found then return; end if;
   select id into next_host from public.players where session_code = p_code order by joined_at limit 1;
-  if next_host is null then
-    delete from public.sessions where code = p_code;
+  if next_host is null or (s.status = 'ended' and s.host_id = p_id) then
+    delete from public.sessions where code = p_code; -- ON DELETE CASCADE supprime players + events + trajectoires
   elsif s.host_id = p_id then
     update public.sessions set host_id = next_host where code = p_code;
   end if;
@@ -390,8 +392,11 @@ begin
    where code = p_code;
 end $$;
 
--- Nettoyage : supprime les sessions de plus de 2 jours
+-- Nettoyage automatique : supprime toutes les sessions terminées (> 15 min) ou abandonnées (> 6 h)
+-- Grâce à ON DELETE CASCADE, cela supprime aussi tous les players, player_secrets et events (trajectoires).
 create or replace function public.cleanup_old_sessions() returns void
 language sql security definer set search_path = public as $$
-  delete from public.sessions where created_at < now() - interval '2 days';
+  delete from public.sessions
+   where (status = 'ended' and ended_at is not null and ended_at < public.now_ms() - 15 * 60000)
+      or created_at < now() - interval '6 hours';
 $$;

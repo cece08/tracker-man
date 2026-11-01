@@ -108,11 +108,11 @@ import { RouterLink } from '@angular/router';
         </div>
 
         <div class="card legal-card">
-          <h3>8. Durée de conservation & Suppression immédiate des données</h3>
+          <h3>8. Durée de conservation & Suppression automatique après chaque partie</h3>
           <ul>
-            <li><b>En quittant la session (In-App) :</b> dès que vous cliquez sur « Quitter » (ou lorsque tous les joueurs quittent la session), votre joueur et la session complète (y compris les positions et trajectoires) sont immédiatement supprimés de la base de données par cascade (<code>ON DELETE CASCADE</code>).</li>
-            <li><b>Purge automatique :</b> les sessions abandonnées sont automatiquement purgées au-delà de 48 heures via la fonction de nettoyage <code>cleanup_old_sessions()</code>.</li>
-            <li><b>Sur votre appareil :</b> vous pouvez effacer vos données locales à tout moment en vidant les données du site dans votre navigateur ou par simple demande à <a href="mailto:paddock.actu.f1@gmail.com">paddock.actu.f1@gmail.com</a>.</li>
+            <li><b>À la fin de chaque partie (bouton « Quitter » ou « Rejouer ») :</b> lorsque vous quittez l'écran de fin ou relancez une manche, toutes les positions GPS, cercles et trajectoires de la partie sont <b>immédiatement et définitivement supprimés</b> de la base de données (<code>ON DELETE CASCADE</code>) ainsi que du stockage local de votre téléphone.</li>
+            <li><b>Purge automatique de sécurité :</b> si tous les joueurs ferment leur navigateur sans cliquer sur « Quitter », toute session terminée depuis plus de <b>15 minutes</b> (ou toute session abandonnée) est automatiquement détruite avec l'intégralité de ses données. Aucune historique de localisation n'est jamais archivé.</li>
+            <li><b>Sur votre appareil :</b> vous pouvez effacer votre pseudonyme local à tout moment en vidant les données du site dans votre navigateur ou par simple demande à <a href="mailto:paddock.actu.f1@gmail.com">paddock.actu.f1@gmail.com</a>.</li>
           </ul>
         </div>
 

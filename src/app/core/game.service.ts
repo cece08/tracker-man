@@ -381,6 +381,8 @@ export class GameService {
   // =================================================================
   async createSession(name: string, settings: Settings): Promise<string> {
     const sb = this.client();
+    this.clearLocalTracks();
+    sb.rpc('cleanup_old_sessions').then();
     let code = '';
     for (let i = 0; i < 8; i++) {
       code = randomCode();
@@ -421,6 +423,9 @@ export class GameService {
 
   async leave() {
     const code = this.code();
+    const s = this.session();
+    const wasHostEnded = s?.status === 'ended' && s?.host_id === this.uid;
+    this.clearLocalTracks();
     this.close();
     localStorage.removeItem('tm_code');
     if (!code) return;
@@ -428,7 +433,17 @@ export class GameService {
     const res = await sb.rpc('leave_session', { p_code: code, p_id: this.uid, p_secret: this.secret });
     if (res.error?.code === 'PGRST202') {
       await sb.rpc('leave_session', { p_code: code, p_id: this.uid });
+      if (wasHostEnded) await sb.from('sessions').delete().eq('code', code);
     }
+    sb.rpc('cleanup_old_sessions').then();
+  }
+
+  private clearLocalTracks() {
+    try {
+      for (const k of Object.keys(localStorage)) {
+        if (k.startsWith('tm_track_')) localStorage.removeItem(k);
+      }
+    } catch { /* ignore */ }
   }
 
   async toggleRole(p: Player) {
