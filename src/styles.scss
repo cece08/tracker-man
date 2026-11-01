@@ -184,6 +184,19 @@ code { background: #0003; padding: 1px 5px; border-radius: 4px; }
 .hud-actions .btn:not(.icon) { flex: 1; padding: 14px 10px; box-shadow: 0 3px 12px #0007; }
 .hunter-code { align-self: center; background: #0f1115e6; border: 2px solid var(--hunter); border-radius: 12px; padding: 8px 16px; font-size: 15px; }
 .hunter-code strong { font-size: 24px; letter-spacing: 4px; color: #ff7b7b; margin-left: 6px; }
+.ally-share-bar {
+  align-self: center; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: center;
+  background: #0f1115e6; backdrop-filter: blur(6px); border: 1px solid #2fd17a55;
+  border-radius: 12px; padding: 6px 10px; box-shadow: 0 3px 12px #0007;
+}
+.ally-label { font-size: 12px; color: var(--muted); font-weight: 600; }
+.ally-pills { display: flex; background: var(--bg2); border-radius: 8px; padding: 2px; gap: 2px; }
+.ally-pills button {
+  border: none; background: transparent; color: var(--muted); font-size: 12px; font-weight: 600;
+  padding: 5px 10px; border-radius: 6px; cursor: pointer;
+}
+.ally-pills button.active { background: var(--hunted); color: #052614; }
+.ally-marker { width: 14px; height: 14px; border-radius: 50%; background: var(--hunted); border: 2px solid #fff; box-shadow: 0 0 8px #2fd17aaa; }
 .gps-status { align-self: flex-start; background: #0f1115cc; border-radius: 8px; padding: 4px 10px; font-size: 12px; color: var(--muted); }
 
 .overlay { position: absolute; inset: 0; z-index: 1500; background: #0f1115f2; display: flex; align-items: center; justify-content: center; text-align: center; font-size: 18px; }

@@ -33,7 +33,9 @@ export interface Session {
   ended_at: number | null;
 }
 
-export interface Circle { lat: number; lng: number; r: number; t: number; }
+export type AllyShareMode = 'off' | 'relative' | 'exact';
+
+export interface Circle { lat: number; lng: number; r: number; t: number; allyShare?: boolean; }
 export interface Pos { lat: number; lng: number; t: number; role?: Role; }
 
 export interface Player {

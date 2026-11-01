@@ -44,6 +44,15 @@ interface OtherLayer { circle?: L.Circle; marker?: L.Marker; }
       <div class="hud-bottom">
         @if (isHunter()) {
           <div class="hunter-code">Ton code chasseur : <strong>{{ game.myCatchCode() }}</strong></div>
+        } @else {
+          <div class="ally-share-bar">
+            <span class="ally-label">🤝 Partager aux chassés :</span>
+            <div class="ally-pills">
+              <button type="button" [class.active]="game.allyShareMode() === 'off'" (click)="game.setAllyShareMode('off')">Off</button>
+              <button type="button" [class.active]="game.allyShareMode() === 'relative'" (click)="game.setAllyShareMode('relative')">⭕ Cercle</button>
+              <button type="button" [class.active]="game.allyShareMode() === 'exact'" (click)="game.setAllyShareMode('exact')">📍 Exacte</button>
+            </div>
+          </div>
         }
         <div class="gps-status">
           @if (game.gpsError(); as err) { ❌ {{ err }} }
@@ -243,6 +252,7 @@ export class GameView implements AfterViewInit, OnDestroy {
 
     // Autres joueurs
     const keep = new Set<string>();
+    const allyExact = this.game.allyExactPos();
     for (const p of players) {
       if (p.id === me.id) continue;
       if (isHunter && !inHead && p.role === 'hunted' && p.circle) {
@@ -273,6 +283,35 @@ export class GameView implements AfterViewInit, OnDestroy {
           this.others.set(p.id, o);
         }
         o.marker!.setLatLng([p.pos.lat, p.pos.lng]);
+      } else if (!isHunter && p.role === 'hunted') {
+        const exact = allyExact[p.id];
+        if (exact && now - exact.t < 25000) {
+          keep.add(p.id);
+          let o = this.others.get(p.id);
+          if (!o?.marker) {
+            this.removeOther(p.id);
+            o = {
+              marker: L.marker([exact.lat, exact.lng], {
+                icon: L.divIcon({ className: '', html: '<div class="ally-marker"></div>', iconSize: [14, 14] }),
+              }).addTo(map).bindTooltip(`🟢 ${escapeHtml(p.name)} (exact)`, { permanent: true, direction: 'top', offset: [0, -8], className: 'lbl' }),
+            };
+            this.others.set(p.id, o);
+          }
+          o.marker!.setLatLng([exact.lat, exact.lng]);
+        } else if (p.circle?.allyShare) {
+          keep.add(p.id);
+          let o = this.others.get(p.id);
+          if (!o?.circle) {
+            this.removeOther(p.id);
+            o = {
+              circle: L.circle([p.circle.lat, p.circle.lng], {
+                radius: p.circle.r, color: '#2fd17a', weight: 2, dashArray: '5 5', fillOpacity: 0.12,
+              }).addTo(map).bindTooltip(`🟢 ${escapeHtml(p.name)} (cercle)`, { permanent: true, direction: 'center', className: 'lbl' }),
+            };
+            this.others.set(p.id, o);
+          }
+          o.circle!.setLatLng([p.circle.lat, p.circle.lng]).setRadius(p.circle.r);
+        }
       }
     }
     for (const id of [...this.others.keys()]) if (!keep.has(id)) this.removeOther(id);

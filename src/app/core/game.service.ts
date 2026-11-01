@@ -1,7 +1,7 @@
 import { Injectable, computed, effect, inject, signal, untracked } from '@angular/core';
 import { createClient, RealtimeChannel, SupabaseClient } from '@supabase/supabase-js';
 import { SUPABASE_ANON_KEY, SUPABASE_CONFIGURED, SUPABASE_URL } from '../supabase.config';
-import { Circle, GameEvent, Player, Pos, Role, Session, Settings } from './models';
+import { AllyShareMode, Circle, GameEvent, Player, Pos, Role, Session, Settings } from './models';
 import { destPoint, distance, random4, randomCode, vibrate } from './utils';
 import { ToastService } from './toast.service';
 
@@ -65,6 +65,10 @@ export class GameService {
   readonly gpsError = signal<string | null>(null);
   readonly myCatchCode = signal<string>('----');
 
+  // Partage de position entre chassés (activable/modifiable en direct pendant la partie)
+  readonly allyShareMode = signal<AllyShareMode>('off');
+  readonly allyExactPos = signal<Record<string, Pos>>({});
+
   // Hors zone
   readonly outOfZoneSince = signal<number | null>(null);
   readonly outOfZoneRemaining = computed(() => {
@@ -111,6 +115,7 @@ export class GameService {
   private lastTrackSample = 0;
   private trackFlushed = false;
   private lastValidGps: { lat: number; lng: number; t: number } | null = null;
+  private lastAllyBroadcast = 0;
 
   constructor() {
     setInterval(() => this.now.set(this.serverNow()), 1000);
@@ -196,6 +201,7 @@ export class GameService {
         })
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'events', filter: f },
         (p) => this.onEvent(p.new as GameEvent))
+      .on('broadcast', { event: 'ally_pos' }, ({ payload }) => this.onAllyBroadcast(payload))
       .on('presence', { event: 'sync' }, () => this.online.set(new Set(Object.keys(ch.presenceState()))))
       .subscribe(async (status) => {
         if (status === 'SUBSCRIBED') {
@@ -215,6 +221,7 @@ export class GameService {
     this.players.set({});
     this.events.set([]);
     this.online.set(new Set());
+    this.allyExactPos.set({});
     this.loaded.set(false);
     this.stopPlaying();
   }
@@ -279,7 +286,61 @@ export class GameService {
   private upsertPlayer(p: Player) {
     const prevRole = this.players()[p.id]?.role;
     this.players.update((m) => ({ ...m, [p.id]: p }));
+    if (p.role !== 'hunted') {
+      this.allyExactPos.update((m) => {
+        const { [p.id]: _r, ...rest } = m;
+        return rest;
+      });
+    }
     if (p.id === this.uid && prevRole !== p.role) this.fetchMyCatchCode(p);
+  }
+
+  private onAllyBroadcast(payload: { id?: string; lat?: number; lng?: number; t?: number; off?: boolean }) {
+    // Seuls les chassés traitent les positions exactes des autres chassés
+    if (this.me()?.role !== 'hunted' || !payload?.id || payload.id === this.uid) return;
+    const sender = this.players()[payload.id];
+    if (!sender || sender.role !== 'hunted') return;
+    if (payload.off || payload.lat == null || payload.lng == null) {
+      this.allyExactPos.update((m) => {
+        const { [payload.id!]: _r, ...rest } = m;
+        return rest;
+      });
+      return;
+    }
+    this.allyExactPos.update((m) => ({
+      ...m,
+      [payload.id!]: { lat: payload.lat!, lng: payload.lng!, t: payload.t ?? this.serverNow() },
+    }));
+  }
+
+  /** Change en direct le mode de partage de localisation avec les autres chassés ('off' | 'relative' | 'exact'). */
+  setAllyShareMode(mode: AllyShareMode) {
+    const prev = this.allyShareMode();
+    if (prev === mode) return;
+    this.allyShareMode.set(mode);
+    if (prev === 'exact' && mode !== 'exact') {
+      this.channel?.send({ type: 'broadcast', event: 'ally_pos', payload: { id: this.uid, off: true } });
+    }
+    const pos = this.myPos();
+    if (pos && this.me()?.role === 'hunted') {
+      this.maybeUpdateCircle(pos, true);
+      if (mode === 'exact') {
+        this.lastAllyBroadcast = 0;
+        this.broadcastExactToAllies(pos);
+      }
+    }
+  }
+
+  private broadcastExactToAllies(pos: MyPos) {
+    if (this.allyShareMode() !== 'exact' || this.me()?.role !== 'hunted' || !this.channel) return;
+    const t = this.serverNow();
+    if (t - this.lastAllyBroadcast < 3000) return;
+    this.lastAllyBroadcast = t;
+    this.channel.send({
+      type: 'broadcast',
+      event: 'ally_pos',
+      payload: { id: this.uid, lat: pos.lat, lng: pos.lng, t },
+    });
   }
 
   private removePlayer(id: string) {
@@ -744,6 +805,7 @@ export class GameService {
       }
     } else {
       this.maybeUpdateCircle(pos);
+      if (this.allyShareMode() === 'exact') this.broadcastExactToAllies(pos);
       if (t - this.lastSeenWrite > 10000) {
         this.lastSeenWrite = t;
         this.updateMe({ seen: t });
@@ -755,21 +817,26 @@ export class GameService {
    * Cercle d'un chassé : son centre est décalé aléatoirement, la vraie position est toujours dedans.
    * Il est régénéré quand le chassé approche du bord, quand le rayon rétrécit ou selon l'intervalle choisi.
    */
-  private maybeUpdateCircle(pos: MyPos) {
+  private maybeUpdateCircle(pos: MyPos, forceFlagUpdate = false) {
     const m = this.me();
     if (!m || m.role !== 'hunted') return;
     const { radius } = this.shrink();
     const now = this.serverNow();
     const refreshSec = this.session()?.settings.circleRefreshSec;
+    const allyShare = this.allyShareMode() !== 'off';
     const c = this.lastCircle && this.lastCircle.t >= (m.circle?.t ?? 0) ? this.lastCircle : m.circle;
     const d = c ? distance(pos, c) : Infinity;
     const expired = !!(c && refreshSec && refreshSec > 0 && now - c.t >= refreshSec * 1000);
     if (!c || c.r !== radius || d > radius * 0.85 || expired) {
       const center = destPoint(pos, radius * (0.1 + Math.random() * 0.6), Math.random() * 360);
-      const circle: Circle = { lat: center.lat, lng: center.lng, r: radius, t: now };
+      const circle: Circle = { lat: center.lat, lng: center.lng, r: radius, t: now, allyShare };
       this.lastCircle = circle;
       this.updateMe({ circle, seen: now });
       this.lastSeenWrite = now;
+    } else if (forceFlagUpdate && c.allyShare !== allyShare) {
+      const circle: Circle = { ...c, allyShare };
+      this.lastCircle = circle;
+      this.updateMe({ circle });
     }
   }
 
