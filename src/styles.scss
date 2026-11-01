@@ -286,6 +286,19 @@ code { background: #0003; padding: 1px 5px; border-radius: 4px; }
   display: flex; align-items: center; justify-content: center; font-size: 14px; box-shadow: 0 2px 8px #000a;
 }
 
+/* Masque le badge / barre d'outils flottante de Netlify qui recouvre les boutons du bas */
+iframe[src*="netlify"],
+div[class*="netlify" i],
+div[id*="netlify" i],
+a[href*="netlify.com" i],
+netlify-drawer,
+#netlify-identity-widget {
+  display: none !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
+  opacity: 0 !important;
+}
+
 /* Marqueurs Leaflet */
 .me-marker { width: 18px; height: 18px; border-radius: 50%; border: 3px solid #fff; box-shadow: 0 0 0 4px #3b8bff55, 0 2px 6px #0008; }
 .mate-marker { width: 14px; height: 14px; border-radius: 50%; background: var(--hunter); border: 2px solid #fff; }
