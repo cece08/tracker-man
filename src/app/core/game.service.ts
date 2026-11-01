@@ -70,7 +70,7 @@ export class GameService {
   readonly isHost = computed(() => this.session()?.host_id === this.uid);
   readonly sortedPlayers = computed(() => Object.values(this.players()).sort((a, b) => a.joined_at - b.joined_at));
   readonly alive = computed(() => this.sortedPlayers().filter((p) => p.role === 'hunted'));
-  readonly logEvents = computed(() => this.events().filter((e) => e.type !== 'pos'));
+  readonly logEvents = computed(() => this.events().filter((e) => e.type !== 'pos' && e.type !== 'track'));
   readonly headStartEnd = computed(() => {
     const s = this.session();
     return s?.start_at != null ? s.start_at + s.settings.headStart * 60000 : 0;
@@ -560,17 +560,20 @@ export class GameService {
     const code = this.code(), m = this.me();
     if (!code || !m) return;
     if (!this.myTrack.length) this.myTrack = this.loadLocalTrack();
+    if (!this.myTrack.length && this.myPos()) {
+      const p = this.myPos()!;
+      this.myTrack = [{ lat: p.lat, lng: p.lng, t: this.serverNow(), role: m.role }];
+    }
     if (!this.myTrack.length) return;
     this.trackFlushed = true;
-    // Évite les doublons si déjà envoyé
-    if (this.events().some((e) => e.type === 'pos' && e.data.playerId === this.uid)) return;
-    const rows = this.myTrack.map((pt) => ({
+    if (this.events().some((e) => (e.type === 'track' || e.type === 'pos') && e.data.playerId === this.uid)) return;
+    await this.sb.from('events').insert({
       session_code: code,
-      type: 'pos',
-      t: pt.t,
-      data: { playerId: this.uid, playerName: m.name, lat: pt.lat, lng: pt.lng, role: pt.role },
-    }));
-    await this.sb.from('events').insert(rows);
+      type: 'track',
+      t: this.serverNow(),
+      data: { playerId: this.uid, playerName: m.name, points: this.myTrack },
+    });
+    await this.refresh();
     try { localStorage.removeItem(`tm_track_${code}_${this.session()?.start_at}`); } catch { /* ignore */ }
   }
 

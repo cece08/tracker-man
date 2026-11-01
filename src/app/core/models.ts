@@ -54,7 +54,7 @@ export interface Player {
 export interface GameEvent {
   id: number;
   session_code: string;
-  type: 'start' | 'caught' | 'out_of_zone' | 'pos';
+  type: 'start' | 'caught' | 'out_of_zone' | 'pos' | 'track';
   t: number;
   data: {
     victim?: string;
@@ -66,6 +66,7 @@ export interface GameEvent {
     role?: Role;
     playerId?: string;
     playerName?: string;
+    points?: Pos[];
   };
 }
 

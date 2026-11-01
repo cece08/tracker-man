@@ -127,6 +127,8 @@ interface PlayerReport {
 
         @if (game.isHost()) {
           <button class="btn primary big" [disabled]="busy()" (click)="replay()">🔁 Rejouer (retour au salon)</button>
+        } @else {
+          <p class="hint center">Ce rapport complet est partagé avec tous les joueurs. En attente de l'hôte pour rejouer…</p>
         }
         <button class="btn ghost big" (click)="quit()">Quitter</button>
       </div>
@@ -181,7 +183,11 @@ export class EndView implements AfterViewInit, OnDestroy {
     const byPlayer = new Map<string, Pos[]>();
 
     for (const e of events) {
-      if (e.type === 'pos' && e.data.playerId && e.data.lat != null && e.data.lng != null) {
+      if (e.type === 'track' && e.data.playerId && Array.isArray(e.data.points)) {
+        let arr = byPlayer.get(e.data.playerId);
+        if (!arr) { arr = []; byPlayer.set(e.data.playerId, arr); }
+        arr.push(...e.data.points);
+      } else if (e.type === 'pos' && e.data.playerId && e.data.lat != null && e.data.lng != null) {
         let arr = byPlayer.get(e.data.playerId);
         if (!arr) { arr = []; byPlayer.set(e.data.playerId, arr); }
         arr.push({ lat: e.data.lat, lng: e.data.lng, t: e.t, role: e.data.role });
@@ -227,6 +233,8 @@ export class EndView implements AfterViewInit, OnDestroy {
     });
   });
 
+  private syncTimer?: ReturnType<typeof setInterval>;
+
   constructor() {
     effect(() => {
       if (this.ready()) this.renderRecapMap();
@@ -243,9 +251,17 @@ export class EndView implements AfterViewInit, OnDestroy {
       this.map?.invalidateSize();
       this.ready.set(true);
     }, 100);
+    // Rafraîchit automatiquement pendant les premières secondes pour récupérer les trajectoires de tous les joueurs
+    let count = 0;
+    this.syncTimer = setInterval(() => {
+      count++;
+      this.game.refresh();
+      if (count >= 6) clearInterval(this.syncTimer);
+    }, 2500);
   }
 
   ngOnDestroy() {
+    clearInterval(this.syncTimer);
     this.map?.remove();
   }
 
