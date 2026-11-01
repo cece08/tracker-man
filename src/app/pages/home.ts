@@ -1,11 +1,12 @@
 import { Component, inject, signal } from '@angular/core';
-import { ActivatedRoute, Router } from '@angular/router';
+import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { GameService } from '../core/game.service';
 import { ToastService } from '../core/toast.service';
 import { PwaService } from '../core/pwa.service';
 
 @Component({
   selector: 'app-home',
+  imports: [RouterLink],
   template: `
     <section class="screen">
       <div class="home-wrap">
@@ -49,6 +50,15 @@ import { PwaService } from '../core/pwa.service';
         @if (pwa.canInstall()) {
           <button class="btn ghost" (click)="pwa.install()">📲 Installer l'application</button>
         }
+
+        <footer class="home-legal-footer">
+          <div class="legal-footer-links">
+            <a routerLink="/mentions">Mentions Légales & CGU</a>
+            <span>•</span>
+            <a routerLink="/confidentialite">Politique de Confidentialité</a>
+          </div>
+          <div class="legal-sub">Un service <a href="https://paddock-actu.com" target="_blank" rel="noopener">Paddock Actu</a> — © 2026 @Célian MLUDEK</div>
+        </footer>
       </div>
     </section>
   `,

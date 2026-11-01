@@ -303,6 +303,28 @@ netlify-drawer,
   opacity: 0 !important;
 }
 
+/* Pages légales (Mentions Légales & Politique de Confidentialité) */
+.legal-content { max-width: 720px; }
+.legal-hero { text-align: center; padding: 20px 18px; }
+.legal-hero h1 { font-size: 22px; margin: 10px 0 6px; }
+.legal-badge {
+  display: inline-block; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px;
+  padding: 4px 10px; border-radius: 99px; background: #ff5a1f26; color: var(--primary2); border: 1px solid #ff5a1f55;
+}
+.legal-card { font-size: 14px; line-height: 1.55; color: #cfd5e2; }
+.legal-card h3 { color: var(--text); font-size: 16px; margin: 0 0 8px; }
+.legal-card p { margin: 8px 0; }
+.legal-card ul { margin: 8px 0; padding-left: 18px; display: flex; flex-direction: column; gap: 8px; }
+.legal-card a { color: var(--primary2); text-decoration: underline; }
+.legal-footer, .home-legal-footer {
+  margin-top: 10px; padding-top: 12px; border-top: 1px solid var(--border);
+  display: flex; flex-direction: column; align-items: center; gap: 6px; font-size: 12px; color: var(--muted);
+}
+.legal-footer-links { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.legal-footer-links a, .legal-sub a { color: var(--muted); text-decoration: underline; }
+.legal-footer-links a:hover, .legal-sub a:hover { color: var(--primary2); }
+.legal-sub { font-size: 11px; color: #687082; text-align: center; }
+
 /* Marqueurs Leaflet */
 .me-marker { width: 18px; height: 18px; border-radius: 50%; border: 3px solid #fff; box-shadow: 0 0 0 4px #3b8bff55, 0 2px 6px #0008; }
 .mate-marker { width: 14px; height: 14px; border-radius: 50%; background: var(--hunter); border: 2px solid #fff; }

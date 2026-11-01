@@ -23,6 +23,13 @@ export class App implements OnInit {
   readonly toast = inject(ToastService);
 
   ngOnInit() {
+    // Redirige les chemins directs (/mentions, /confidentialite) vers les routes hash (#/mentions, #/confidentialite)
+    const p = location.pathname.replace(/\/+$/, '');
+    if (p.endsWith('/mentions') && !location.hash.includes('/mentions')) {
+      history.replaceState(null, '', location.pathname.replace(/\/mentions$/, '/') + '#/mentions');
+    } else if (p.endsWith('/confidentialite') && !location.hash.includes('/confidentialite')) {
+      history.replaceState(null, '', location.pathname.replace(/\/confidentialite$/, '/') + '#/confidentialite');
+    }
     this.removeInjectedBadges();
     const obs = new MutationObserver(() => this.removeInjectedBadges());
     obs.observe(document.documentElement, { childList: true, subtree: true });
