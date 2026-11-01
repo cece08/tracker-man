@@ -12,7 +12,10 @@ import { PwaService } from '../core/pwa.service';
         <div class="logo">
           <img src="icons/icon-192x192.png" alt="" />
           <h1>Tracker <span>Man</span></h1>
-          <p class="tagline">La chasse à l'homme GPS en temps réel</p>
+          <p class="tagline">Le cache-cache géant grandeur nature au radar GPS</p>
+          <p class="intro-desc">
+            Cache-toi ou pars à la recherche de tes amis dans la vraie vie : les chercheurs traquent les cachés grâce à des zones radar qui rétrécissent au fil du temps !
+          </p>
         </div>
 
         @if (savedCode()) {
