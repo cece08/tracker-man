@@ -1,5 +1,6 @@
-import { Component, computed, inject, signal } from '@angular/core';
+import { Component, computed, effect, inject, signal } from '@angular/core';
 import { Router } from '@angular/router';
+import * as QRCode from 'qrcode';
 import { GameService } from '../core/game.service';
 import { ToastService } from '../core/toast.service';
 import { Player, Settings } from '../core/models';
@@ -18,7 +19,18 @@ import { SettingsEditor } from './settings-editor';
         <div class="card code-card">
           <p>Code de la session</p>
           <div class="big-code">{{ s().code }}</div>
-          <button class="btn ghost small" (click)="share()">🔗 Partager</button>
+          @if (qrDataUrl()) {
+            <div class="qr-wrap" (click)="zoomQr.set(true)" title="Toucher pour agrandir">
+              <img [src]="qrDataUrl()!" alt="QR code de la session" class="qr-img" />
+              <span class="qr-hint">📲 Scanne pour rejoindre (touche pour agrandir)</span>
+            </div>
+          }
+          <div style="display:flex; gap:8px; justify-content:center; margin-top:8px">
+            <button class="btn ghost small" (click)="share()">🔗 Partager le lien</button>
+            @if (qrDataUrl()) {
+              <button class="btn ghost small" (click)="zoomQr.set(true)">🔍 Agrandir le QR</button>
+            }
+          </div>
         </div>
 
         <div class="card">
@@ -118,6 +130,20 @@ import { SettingsEditor } from './settings-editor';
           </div>
         </div>
       }
+      <!-- Modale : QR code plein écran -->
+      @if (zoomQr() && qrDataUrl()) {
+        <div class="modal" (click)="zoomQr.set(false)">
+          <div class="modal-box qr-modal" (click)="$event.stopPropagation()">
+            <h3>📲 Scanne pour rejoindre</h3>
+            <div class="big-code" style="margin: 2px 0">{{ s().code }}</div>
+            <img [src]="qrDataUrl()!" alt="QR Code" class="qr-img-large" />
+            <p class="hint center">Ouvre l'appareil photo de ton téléphone et vise ce QR code.</p>
+            <div class="modal-actions">
+              <button type="button" class="btn secondary" (click)="zoomQr.set(false)">Fermer</button>
+            </div>
+          </div>
+        </div>
+      }
     </section>
   `,
 })
@@ -132,6 +158,21 @@ export class LobbyView {
   readonly editingSettings = signal(false);
   readonly renamingPlayer = signal<Player | null>(null);
   readonly renameValue = signal('');
+  readonly qrDataUrl = signal<string | null>(null);
+  readonly zoomQr = signal(false);
+
+  constructor() {
+    effect(() => {
+      const code = this.s()?.code;
+      if (!code) return;
+      const url = `${location.origin}${location.pathname}#/?code=${code}`;
+      QRCode.toDataURL(url, {
+        width: 360,
+        margin: 2,
+        color: { dark: '#0f1115', light: '#ffffff' },
+      }).then((dataUrl) => this.qrDataUrl.set(dataUrl)).catch(console.error);
+    });
+  }
 
   toggle(p: Player) {
     if (this.manual() && this.game.isHost()) this.game.toggleRole(p);

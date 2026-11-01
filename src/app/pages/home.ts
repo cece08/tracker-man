@@ -21,9 +21,16 @@ import { PwaService } from '../core/pwa.service';
 
         <label class="field">
           <span>Ton pseudo</span>
-          <input type="text" maxlength="20" placeholder="Ex : Renard" autocomplete="nickname"
-                 [value]="name()" (input)="name.set($any($event.target).value)" />
+          <input #nameInput type="text" maxlength="20" placeholder="Ex : Renard" autocomplete="nickname"
+                 [value]="name()" (input)="name.set($any($event.target).value)" (keyup.enter)="onNameEnter()" />
         </label>
+
+        @if (fromQr()) {
+          <div class="card qr-join-banner">
+            <p style="margin:0 0 8px">📲 Session détectée : <b>{{ code() }}</b></p>
+            <button class="btn primary big" [disabled]="busy()" (click)="join()">🚀 Rejoindre la session {{ code() }}</button>
+          </div>
+        }
 
         <button class="btn primary big" (click)="goCreate()">🎯 Créer une session</button>
 
@@ -50,9 +57,26 @@ export class HomePage {
   readonly pwa = inject(PwaService);
 
   readonly name = signal(localStorage.getItem('tm_name') ?? '');
-  readonly code = signal((inject(ActivatedRoute).snapshot.queryParamMap.get('code') ?? '').toUpperCase());
+  readonly code = signal('');
+  readonly fromQr = signal(false);
   readonly savedCode = signal(localStorage.getItem('tm_code'));
   readonly busy = signal(false);
+
+  constructor() {
+    const route = inject(ActivatedRoute);
+    const paramCode = (route.snapshot.queryParamMap.get('code') ?? new URLSearchParams(location.search).get('code') ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (paramCode.length === 6) {
+      this.code.set(paramCode);
+      this.fromQr.set(true);
+      if (this.name().trim() && this.game.configured) {
+        setTimeout(() => this.join(), 150);
+      }
+    }
+  }
+
+  onNameEnter() {
+    if (this.code().length === 6) this.join();
+  }
 
   onCode(e: Event) {
     const input = e.target as HTMLInputElement;
