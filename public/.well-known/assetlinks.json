@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "app.trackerman.twa",
+      "sha256_cert_fingerprints": [
+        "A6:8F:38:EF:94:53:81:49:61:DA:C4:F6:38:1E:0F:7C:36:36:5E:B6:B9:9B:DC:81:C1:B7:29:6E:C1:13:87:B0"
+      ]
+    }
+  }
+]

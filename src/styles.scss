@@ -138,11 +138,12 @@ code { background: #0003; padding: 1px 5px; border-radius: 4px; }
 .players li { display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: var(--bg2); border-radius: 10px; }
 .players li.clickable { cursor: pointer; }
 .players .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.players .tag { font-size: 12px; padding: 3px 8px; border-radius: 99px; background: #333a48; color: var(--muted); }
-.players .tag.clickable { cursor: pointer; }
-.players .tag.hunter { background: #ff3b3b33; color: #ff7b7b; }
-.players .tag.hunted { background: #2fd17a33; color: #5fe39a; }
-.players .tag.caught { background: #ff8a3d33; color: var(--primary2); }
+.players .tag, .tag { font-size: 12px; padding: 3px 8px; border-radius: 99px; background: #333a48; color: var(--muted); font-weight: 600; }
+.players .tag.clickable, .tag.clickable { cursor: pointer; }
+.players .tag.hunter, .tag.hunter { background: #ff3b3b33; color: #ff7b7b; }
+.players .tag.hunted, .tag.hunted { background: #2fd17a33; color: #5fe39a; }
+.players .tag.caught, .tag.caught { background: #ff8a3d33; color: var(--primary2); }
+.privacy-card { border-color: #2fd17a44; background: linear-gradient(180deg, #192221 0%, var(--card) 100%); }
 .mini-btn {
   width: 28px; height: 28px; border: 1px solid var(--border); border-radius: 8px;
   background: var(--card); cursor: pointer; display: inline-flex; align-items: center;

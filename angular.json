@@ -49,6 +49,11 @@
               {
                 "glob": "**/*",
                 "input": "public"
+              },
+              {
+                "glob": "assetlinks.json",
+                "input": "public/.well-known",
+                "output": ".well-known"
               }
             ],
             "styles": [

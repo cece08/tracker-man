@@ -63,6 +63,7 @@ export class GameService {
   readonly now = signal(Date.now());
   readonly myPos = signal<MyPos | null>(null);
   readonly gpsError = signal<string | null>(null);
+  readonly gpsRevoked = signal<boolean>(localStorage.getItem('tm_gps_revoked') === '1');
   readonly myCatchCode = signal<string>('----');
 
   // Partage de position entre chassés (activable/modifiable en direct pendant la partie)
@@ -690,6 +691,15 @@ export class GameService {
         Notification.requestPermission().catch(() => {});
       }
     } catch { /* ignore */ }
+    if (this.gpsRevoked()) {
+      this.gpsError.set('Accès GPS retiré — réactive-le pour cette partie');
+      return;
+    }
+    this.startGpsWatcher();
+  }
+
+  private startGpsWatcher() {
+    if (this.watchId != null) navigator.geolocation.clearWatch(this.watchId);
     if (!('geolocation' in navigator)) {
       this.gpsError.set('GPS non disponible sur cet appareil');
       return;
@@ -726,8 +736,35 @@ export class GameService {
     this.outOfZoneSince.set(null);
     if (this.watchId != null) navigator.geolocation.clearWatch(this.watchId);
     this.watchId = null;
+    this.myPos.set(null);
     this.wakeLock?.release().catch(() => {});
     this.wakeLock = null;
+  }
+
+  /** Coupe immédiatement le GPS, efface la position locale/serveur et bloque l'accès jusqu'à réactivation explicite. */
+  async revokeGpsAccess() {
+    if (this.watchId != null) navigator.geolocation.clearWatch(this.watchId);
+    this.watchId = null;
+    this.myPos.set(null);
+    this.lastCircle = null;
+    this.myTrack = [];
+    this.clearLocalTracks();
+    this.gpsRevoked.set(true);
+    try { localStorage.setItem('tm_gps_revoked', '1'); } catch { /* ignore */ }
+    const code = this.code();
+    if (code && this.sb) {
+      await this.sb.from('players').update({ pos: null, circle: null }).eq('session_code', code).eq('id', this.uid);
+    }
+    this.toast.show('🔒 Droits GPS retirés & position effacée');
+  }
+
+  /** Réactive l'accès GPS pour une nouvelle partie après un verrouillage de sécurité. */
+  restoreGpsAccess() {
+    this.gpsRevoked.set(false);
+    try { localStorage.removeItem('tm_gps_revoked'); } catch { /* ignore */ }
+    this.gpsError.set(null);
+    if (this.playing) this.startGpsWatcher();
+    this.toast.show('📍 Accès GPS réactivé pour cette partie');
   }
 
   /** Enregistre localement un point GPS toutes les 6 s (ou dès 8 m de déplacement) pour le récap de fin. */

@@ -125,6 +125,33 @@ interface PlayerReport {
           </ul>
         </div>
 
+        <!-- Sécurité & Droits de géolocalisation -->
+        <div class="card privacy-card">
+          <div class="row-between">
+            <h3>🛡️ Sécurité & Géolocalisation</h3>
+            <span class="tag" [class]="game.gpsRevoked() ? 'hunter' : 'hunted'">
+              {{ game.gpsRevoked() ? '🔒 Droits retirés' : '⏹️ GPS arrêté' }}
+            </span>
+          </div>
+          @if (game.gpsRevoked()) {
+            <p class="hint">
+              Tu as retiré l'accès GPS à Tracker Man. Ta position actuelle a été effacée et l'application ne peut plus te géolocaliser sans ton accord explicite.
+            </p>
+            <div class="modal-actions" style="margin-top:10px">
+              <button class="btn secondary small" (click)="showOsGuide.set(true)">⚙️ Réglages téléphone</button>
+              <button class="btn ghost small" (click)="game.restoreGpsAccess()">📍 Réactiver pour rejouer</button>
+            </div>
+          } @else {
+            <p class="hint">
+              La partie est terminée : le suivi GPS est automatiquement coupé. Souhaites-tu retirer les droits de géolocalisation à Tracker Man ?
+            </p>
+            <div class="modal-actions" style="margin-top:10px">
+              <button class="btn danger small" (click)="revokeGps()">🔒 Retirer les droits GPS</button>
+              <button class="btn ghost small" (click)="showOsGuide.set(true)">⚙️ Réglages téléphone</button>
+            </div>
+          }
+        </div>
+
         @if (game.isHost()) {
           <button class="btn primary big" [disabled]="busy()" (click)="replay()">🔁 Rejouer (retour au salon)</button>
         } @else {
@@ -132,6 +159,50 @@ interface PlayerReport {
         }
         <button class="btn ghost big" (click)="quit()">Quitter</button>
       </div>
+
+      <!-- Popup automatique de fin de partie : Retirer les droits de géolocalisation -->
+      @if (showPrivacyModal()) {
+        <div class="modal" (click)="dismissPrivacyModal()">
+          <div class="modal-box" (click)="$event.stopPropagation()">
+            <h3>🛡️ Partie terminée — Sécurité GPS</h3>
+            <p class="hint" style="font-size:14px; line-height:1.45">
+              Le partage de position s'est <b>arrêté automatiquement</b> dès la fin de la partie.
+            </p>
+            <p class="hint" style="font-size:14px; line-height:1.45">
+              Par mesure de sécurité, veux-tu <b>retirer les droits de géolocalisation</b> à Tracker Man maintenant ?
+            </p>
+            <div class="modal-actions" style="flex-direction:column; gap:8px; margin-top:10px">
+              <button class="btn danger big" (click)="revokeFromModal()">🔒 Oui, retirer les droits de géolocalisation</button>
+              <button class="btn secondary big" (click)="dismissPrivacyModal()">✅ Garder pour la prochaine partie</button>
+            </div>
+          </div>
+        </div>
+      }
+
+      <!-- Guide pour couper aussi l'autorisation système (Android / iOS / Navigateur) -->
+      @if (showOsGuide()) {
+        <div class="modal" (click)="showOsGuide.set(false)">
+          <div class="modal-box" (click)="$event.stopPropagation()">
+            <h3>🔒 Retirer l'autorisation GPS sur ton appareil</h3>
+            <p class="hint" style="font-size:14px; line-height:1.45">
+              Le GPS est déjà <b>coupé et verrouillé</b> dans Tracker Man. Si tu veux aussi retirer l'autorisation système de ton téléphone :
+            </p>
+            <ul class="players" style="font-size:13px; line-height:1.4">
+              <li style="flex-direction:column; align-items:flex-start; gap:4px">
+                <b>📱 Application Android (Tracker Man)</b>
+                <span class="hint" style="margin:0">Appui long sur l'icône <b>Tracker Man</b> → <b>Infos sur l'appli (ⓘ)</b> → <b>Autorisations</b> → <b>Position</b> → <b>Ne pas autoriser</b>.</span>
+              </li>
+              <li style="flex-direction:column; align-items:flex-start; gap:4px">
+                <b>🌐 Navigateur (Chrome / Safari)</b>
+                <span class="hint" style="margin:0">Touche l'icône <b>🔒 / Réglages</b> à gauche de la barre d'adresse → <b>Autorisations</b> → coupe la <b>Position</b>.</span>
+              </li>
+            </ul>
+            <div class="modal-actions">
+              <button class="btn primary" (click)="showOsGuide.set(false)">Fermer</button>
+            </div>
+          </div>
+        </div>
+      }
     </section>
   `,
 })
@@ -145,6 +216,8 @@ export class EndView implements AfterViewInit, OnDestroy {
   readonly fmt = fmtDuration;
   readonly busy = signal(false);
   readonly selectedPlayer = signal<string | null>(null);
+  readonly showPrivacyModal = signal(false);
+  readonly showOsGuide = signal(false);
 
   private map?: L.Map;
   private layerGroup?: L.LayerGroup;
@@ -251,6 +324,11 @@ export class EndView implements AfterViewInit, OnDestroy {
       this.map?.invalidateSize();
       this.ready.set(true);
     }, 100);
+    // Demande automatiquement au joueur s'il souhaite retirer les droits GPS dès la fin de la partie
+    const promptKey = `tm_priv_${this.game.code()}_${this.game.session()?.ended_at ?? ''}`;
+    if (!this.game.gpsRevoked() && !sessionStorage.getItem(promptKey)) {
+      this.showPrivacyModal.set(true);
+    }
     // Rafraîchit automatiquement pendant les premières secondes pour récupérer les trajectoires de tous les joueurs
     let count = 0;
     this.syncTimer = setInterval(() => {
@@ -258,6 +336,28 @@ export class EndView implements AfterViewInit, OnDestroy {
       this.game.refresh();
       if (count >= 6) clearInterval(this.syncTimer);
     }, 2500);
+  }
+
+  private markPrivacyPromptSeen() {
+    try {
+      const promptKey = `tm_priv_${this.game.code()}_${this.game.session()?.ended_at ?? ''}`;
+      sessionStorage.setItem(promptKey, '1');
+    } catch { /* ignore */ }
+  }
+
+  dismissPrivacyModal() {
+    this.markPrivacyPromptSeen();
+    this.showPrivacyModal.set(false);
+  }
+
+  async revokeFromModal() {
+    this.markPrivacyPromptSeen();
+    this.showPrivacyModal.set(false);
+    await this.game.revokeGpsAccess();
+  }
+
+  async revokeGps() {
+    await this.game.revokeGpsAccess();
   }
 
   ngOnDestroy() {

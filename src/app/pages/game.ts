@@ -69,6 +69,24 @@ interface OtherLayer { circle?: L.Circle; marker?: L.Marker; }
         </div>
       </div>
 
+      @if (game.gpsRevoked()) {
+        <div class="modal">
+          <div class="modal-box">
+            <h3>🔒 Accès GPS verrouillé</h3>
+            <p class="hint" style="font-size:14px; line-height:1.45">
+              Tu avais retiré les droits de géolocalisation à la fin de ta dernière partie.
+            </p>
+            <p class="hint" style="font-size:14px; line-height:1.45">
+              Autorises-tu Tracker Man à utiliser ta position <b>uniquement pendant cette nouvelle partie</b> ?
+            </p>
+            <div class="modal-actions">
+              <button class="btn ghost" (click)="leave()">Quitter</button>
+              <button class="btn primary" (click)="game.restoreGpsAccess()">📍 Autoriser pour cette partie</button>
+            </div>
+          </div>
+        </div>
+      }
+
       @if (showKeepOnNotice()) {
         <div class="modal" (click)="showKeepOnNotice.set(false)">
           <div class="modal-box" (click)="$event.stopPropagation()">
