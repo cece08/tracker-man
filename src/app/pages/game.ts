@@ -80,7 +80,7 @@ interface OtherLayer { circle?: L.Circle; marker?: L.Marker; }
               Autorises-tu Tracker Man à utiliser ta position <b>uniquement pendant cette nouvelle partie</b> ?
             </p>
             <div class="modal-actions">
-              <button class="btn ghost" (click)="leave()">Quitter</button>
+              <button class="btn ghost" (click)="confirmLeave(true)">Quitter</button>
               <button class="btn primary" (click)="game.restoreGpsAccess()">📍 Autoriser pour cette partie</button>
             </div>
           </div>
@@ -171,6 +171,25 @@ interface OtherLayer { circle?: L.Circle; marker?: L.Marker; }
           </div>
         </div>
       }
+
+      @if (showLeaveModal()) {
+        <div class="modal" (click)="showLeaveModal.set(false)">
+          <div class="modal-box" (click)="$event.stopPropagation()">
+            <h3>🛡️ Quitter la partie — Sécurité GPS</h3>
+            <p class="hint" style="font-size:14px; line-height:1.45">
+              En quittant la partie, le partage de position s'arrête immédiatement et tes traces locales sont effacées.
+            </p>
+            <p class="hint" style="font-size:14px; line-height:1.45">
+              Par mesure de sécurité, souhaites-tu aussi <b>retirer les droits de géolocalisation</b> à Tracker Man ?
+            </p>
+            <div class="modal-actions" style="flex-direction:column; gap:8px; margin-top:10px">
+              <button class="btn danger big" [disabled]="busy()" (click)="confirmLeave(true)">🔒 Quitter & retirer les droits GPS</button>
+              <button class="btn secondary big" [disabled]="busy()" (click)="confirmLeave(false)">🚪 Quitter (garder pour rejouer)</button>
+              <button class="btn ghost big" [disabled]="busy()" (click)="showLeaveModal.set(false)">Annuler</button>
+            </div>
+          </div>
+        </div>
+      }
     </section>
   `,
 })
@@ -187,6 +206,7 @@ export class GameView implements AfterViewInit, OnDestroy {
 
   readonly showCaught = signal(false);
   readonly showPlayers = signal(false);
+  readonly showLeaveModal = signal(false);
   readonly showKeepOnNotice = signal(true);
   readonly pocketMode = signal(false);
   readonly catchCode = signal('');
@@ -412,10 +432,21 @@ export class GameView implements AfterViewInit, OnDestroy {
     }
   }
 
-  async leave() {
-    if (!confirm('Quitter la partie en cours ?')) return;
-    await this.game.leave();
-    this.router.navigate(['/']);
+  leave() {
+    this.showPlayers.set(false);
+    this.showLeaveModal.set(true);
+  }
+
+  async confirmLeave(revokeGps: boolean) {
+    this.busy.set(true);
+    try {
+      if (revokeGps) await this.game.revokeGpsAccess();
+      await this.game.leave();
+      this.showLeaveModal.set(false);
+      this.router.navigate(['/']);
+    } finally {
+      this.busy.set(false);
+    }
   }
 }
 

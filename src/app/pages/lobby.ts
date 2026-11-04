@@ -144,6 +144,22 @@ import { SettingsEditor } from './settings-editor';
           </div>
         </div>
       }
+
+      @if (showLeaveModal()) {
+        <div class="modal" (click)="showLeaveModal.set(false)">
+          <div class="modal-box" (click)="$event.stopPropagation()">
+            <h3>🛡️ Quitter la session — Sécurité GPS</h3>
+            <p class="hint" style="font-size:14px; line-height:1.45">
+              Souhaites-tu aussi <b>retirer les droits de géolocalisation</b> à Tracker Man en quittant le salon ?
+            </p>
+            <div class="modal-actions" style="flex-direction:column; gap:8px; margin-top:10px">
+              <button type="button" class="btn danger big" [disabled]="busy()" (click)="confirmLeave(true)">🔒 Quitter & retirer les droits GPS</button>
+              <button type="button" class="btn secondary big" [disabled]="busy()" (click)="confirmLeave(false)">🚪 Quitter simplement</button>
+              <button type="button" class="btn ghost big" [disabled]="busy()" (click)="showLeaveModal.set(false)">Annuler</button>
+            </div>
+          </div>
+        </div>
+      }
     </section>
   `,
 })
@@ -160,6 +176,7 @@ export class LobbyView {
   readonly renameValue = signal('');
   readonly qrDataUrl = signal<string | null>(null);
   readonly zoomQr = signal(false);
+  readonly showLeaveModal = signal(false);
 
   constructor() {
     effect(() => {
@@ -240,9 +257,19 @@ export class LobbyView {
     } catch { /* partage annulé */ }
   }
 
-  async leave() {
-    if (!confirm('Quitter la session ?')) return;
-    await this.game.leave();
-    this.router.navigate(['/']);
+  leave() {
+    this.showLeaveModal.set(true);
+  }
+
+  async confirmLeave(revokeGps: boolean) {
+    this.busy.set(true);
+    try {
+      if (revokeGps) await this.game.revokeGpsAccess();
+      await this.game.leave();
+      this.showLeaveModal.set(false);
+      this.router.navigate(['/']);
+    } finally {
+      this.busy.set(false);
+    }
   }
 }
