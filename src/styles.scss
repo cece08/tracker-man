@@ -106,16 +106,6 @@ code { background: #0003; padding: 1px 5px; border-radius: 4px; }
 .hint { color: var(--muted); font-size: 13px; margin: 6px 0 0; }
 .center { text-align: center; }
 .error { color: #ff6b6b; font-size: 14px; margin: 8px 0 0; }
-.maintenance-card {
-  border-color: #ff5a1f88;
-  background: linear-gradient(135deg, #2a1814, #1d1518);
-  text-align: center;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.maintenance-card strong { color: var(--primary2); font-size: 15px; }
-.maintenance-card p { margin: 0; font-size: 14px; color: var(--text); line-height: 1.4; }
 
 .segmented { display: flex; background: var(--bg2); border-radius: 10px; padding: 4px; margin-bottom: 8px; }
 .segmented button { flex: 1; border: none; background: transparent; padding: 8px; border-radius: 8px; cursor: pointer; color: var(--muted); }

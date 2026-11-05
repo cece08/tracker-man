@@ -269,7 +269,7 @@ export class SettingsEditor implements AfterViewInit, OnDestroy {
     const z = this.zone();
     this.map = L.map(el, { zoomControl: true }).setView([z.lat, z.lng], 14);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19, attribution: '© OpenStreetMap',
+      maxZoom: 19, attribution: '© OpenStreetMap', crossOrigin: 'anonymous',
     }).addTo(this.map);
 
     this.circleLayer = L.circle([z.lat, z.lng], {

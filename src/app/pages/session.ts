@@ -1,7 +1,6 @@
 import { Component, OnInit, effect, inject } from '@angular/core';
 import { ActivatedRoute, Router } from '@angular/router';
 import { GameService } from '../core/game.service';
-import { ToastService } from '../core/toast.service';
 import { LobbyView } from './lobby';
 import { GameView } from './game';
 import { EndView } from './end';
@@ -26,7 +25,6 @@ export class SessionPage implements OnInit {
   readonly game = inject(GameService);
   private route = inject(ActivatedRoute);
   private router = inject(Router);
-  private toast = inject(ToastService);
 
   constructor() {
     effect(() => {
@@ -35,7 +33,8 @@ export class SessionPage implements OnInit {
   }
 
   ngOnInit() {
-    this.toast.show('⚠️ Une mise à jour est en cours : réouverture prévue le 12 novembre', 4500);
-    this.router.navigate(['/']);
+    const code = (this.route.snapshot.paramMap.get('code') ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (!this.game.configured || code.length !== 6) return void this.router.navigate(['/']);
+    this.game.open(code);
   }
 }

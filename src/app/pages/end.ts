@@ -317,7 +317,7 @@ export class EndView implements AfterViewInit, OnDestroy {
   ngAfterViewInit() {
     this.map = L.map(this.mapEl().nativeElement, { zoomControl: true }).setView([46.6, 2.4], 13);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19, attribution: '© OpenStreetMap',
+      maxZoom: 19, attribution: '© OpenStreetMap', crossOrigin: 'anonymous',
     }).addTo(this.map);
     this.layerGroup = L.layerGroup().addTo(this.map);
     setTimeout(() => {
@@ -400,9 +400,11 @@ export class EndView implements AfterViewInit, OnDestroy {
 
       // Point de départ
       const first = r.points[0];
+      const safeName = escapeHtml(r.player.name);
+      const safeStatus = escapeHtml(r.statusLabel);
       L.circleMarker([first.lat, first.lng], {
         radius: 6, color: '#fff', weight: 2, fillColor: r.color, fillOpacity: 1,
-      }).bindTooltip(`Départ ${r.player.name} (${fmtClock(first.t)})`, { className: 'lbl' }).addTo(this.layerGroup);
+      }).bindTooltip(`Départ ${safeName} (${fmtClock(first.t)})`, { className: 'lbl' }).addTo(this.layerGroup);
 
       // Point de capture / élimination si applicable
       if (r.player.caught_at) {
@@ -415,7 +417,7 @@ export class EndView implements AfterViewInit, OnDestroy {
             html: `<div class="catch-pin" style="border-color:${r.color}">${r.player.caught_by === 'ZONE' ? '🚫' : '⭐'}</div>`,
             iconSize: [26, 26],
           }),
-        }).bindTooltip(`${r.player.name} : ${r.statusLabel} (${r.caughtAtClock})`, { permanent: false, className: 'lbl' })
+        }).bindTooltip(`${safeName} : ${safeStatus} (${r.caughtAtClock ?? ''})`, { permanent: false, className: 'lbl' })
           .addTo(this.layerGroup);
       }
 
@@ -423,7 +425,7 @@ export class EndView implements AfterViewInit, OnDestroy {
       const last = r.points[r.points.length - 1];
       L.circleMarker([last.lat, last.lng], {
         radius: 8, color: '#fff', weight: 2, fillColor: r.color, fillOpacity: 1,
-      }).bindTooltip(`${r.player.name} (fin)`, { permanent: true, direction: 'top', offset: [0, -8], className: 'lbl' })
+      }).bindTooltip(`${safeName} (fin)`, { permanent: true, direction: 'top', offset: [0, -8], className: 'lbl' })
         .addTo(this.layerGroup);
     }
 
@@ -450,4 +452,8 @@ export class EndView implements AfterViewInit, OnDestroy {
     await this.game.leave();
     this.router.navigate(['/']);
   }
+}
+
+function escapeHtml(s: string) {
+  return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 }

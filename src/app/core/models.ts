@@ -1,4 +1,4 @@
-// Modèles de données (miroir des tables Supabase, voir supabase/schema.sql)
+// Modèles de données P2P E2EE (100 % en mémoire vive — zéro base de données)
 
 export type Role = 'hunter' | 'hunted';
 export type Status = 'lobby' | 'playing' | 'ended';
@@ -17,7 +17,7 @@ export interface Settings {
   shrinkEvery: number;  // intervalle de rétrécissement (min)
   roleMode: 'random' | 'manual';
   hunters: number;      // nombre de chasseurs en mode aléatoire
-  zone?: Zone | null;   // zone autorisée (optionnelle)
+  zone?: Zone | null;   // zone autorisée (optionnelle, chiffrée de bout en bout)
   outGraceSec?: number; // secondes autorisées hors zone avant élimination
   circleRefreshSec?: number | null; // actualisation périodique du cercle en secondes (null = uniquement si sortie/rétrécissement)
 }
@@ -44,9 +44,11 @@ export interface Player {
   name: string;
   role: Role;
   initial_role: Role | null;
-  catch_code: string;
+  catch_code: string;        // toujours '****' sur le réseau (le vrai code reste sur l'appareil du joueur)
+  catch_commitment?: string; // engagement PBKDF2-SHA-256 (60 000 itérations) du code chasseur
+  pub_key?: string;          // clé publique ECDSA P-256 (SPKI Base64) authentifiant chaque action
   joined_at: number;
-  caught_by: string | null; // ID du chasseur ou 'ZONE' si éliminé hors zone
+  caught_by: string | null;  // ID du chasseur ou 'ZONE' si éliminé hors zone
   caught_at: number | null;
   circle: Circle | null;
   pos: Pos | null;

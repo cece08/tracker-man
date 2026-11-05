@@ -32,13 +32,17 @@ export class CreatePage {
   readonly defaultSettings = DEFAULT_SETTINGS;
   readonly busy = signal(false);
 
-  constructor() {
-    this.toast.show('⚠️ Une mise à jour est en cours : réouverture prévue le 12 novembre', 4500);
-    this.router.navigate(['/']);
-  }
-
-  async create(_settings: Settings) {
-    this.toast.show('⚠️ Une mise à jour est en cours : réouverture prévue le 12 novembre', 4500);
-    this.router.navigate(['/']);
+  async create(settings: Settings) {
+    const name = localStorage.getItem('tm_name');
+    if (!name) return void this.router.navigate(['/']);
+    this.busy.set(true);
+    try {
+      const code = await this.game.createSession(name, settings);
+      this.router.navigate(['/session', code]);
+    } catch (e) {
+      this.toast.show('Erreur : ' + (e as Error).message);
+    } finally {
+      this.busy.set(false);
+    }
   }
 }

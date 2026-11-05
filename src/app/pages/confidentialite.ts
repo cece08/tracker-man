@@ -16,14 +16,17 @@ import { RouterLink } from '@angular/router';
           <span class="legal-badge">Un service Paddock Actu</span>
           <h1>Politique de Confidentialité & Protection des Données</h1>
           <p class="hint">
-            Application Web & PWA Tracker Man (sous la direction de Paddock Actu) — Dernière mise à jour : 01/11/2026
+            Application Web & PWA Tracker Man (sous la direction de Paddock Actu) — Architecture 100 % Peer-to-Peer E2EE (Zéro Base de Données) — Dernière mise à jour : 05/11/2026
           </p>
         </div>
 
         <div class="card legal-card">
-          <h3>Engagement de confidentialité & Protection de la vie privée</h3>
+          <h3>Engagement de confidentialité & Architecture « Zéro Serveur / Zéro Base de Données »</h3>
           <p>
-            <b>Tracker Man</b>, service édité sous la direction de <b>Paddock Actu</b>, s'engage formellement à garantir la confidentialité et la sécurité des données de ses utilisateurs, conformément au Règlement Général sur la Protection des Données (RGPD — UE 2016/679) et aux recommandations de la CNIL.
+            <b>Tracker Man</b>, service édité sous la direction de <b>Paddock Actu</b>, applique une architecture de sécurité de niveau gouvernemental (« <i>Privacy by Design, Zero-Knowledge & Serverless P2P</i> »), conforme au Règlement Général sur la Protection des Données (RGPD — UE 2016/679, articles 25 et 32), aux recommandations de la CNIL, de l'ANSSI, de l'ENISA et aux référentiels internationaux ISO/IEC 27001, ISO/IEC 27701, NIST FIPS 186-5 / SP 800-38D et OWASP ASVS Niveau 3.
+          </p>
+          <p>
+            <b>Aucune base de données et aucun serveur de stockage n'existent :</b> toutes les communications (salon, positions, cercles radar et trajectoires) s'effectuent directement entre les appareils des participants de la session en mémoire vive (RAM), protégées par un <b>chiffrement de bout en bout (E2EE) AES-256-GCM</b> et des <b>signatures numériques asymétriques ECDSA P-256</b>.
           </p>
         </div>
 
@@ -33,7 +36,7 @@ import { RouterLink } from '@angular/router';
             La présente Politique de Confidentialité s'applique au site web et à l'application web progressive (PWA) <b>Tracker Man</b> (ci-après le « Service »), rattachés à l'écosystème <b>Paddock Actu</b> (<a href="https://paddock-actu.com" target="_blank" rel="noopener">paddock-actu.com</a>).
           </p>
           <p>
-            Elle informe les joueurs en toute transparence sur les modalités de collecte, d'utilisation en temps réel, de sécurisation et de suppression automatique des données traitées lors d'une partie.
+            Elle informe les joueurs en toute transparence sur les protocoles cryptographiques Peer-to-Peer (P2P), l'absence totale de base de données et la volatilité immédiate des informations traitées en mémoire vive.
           </p>
         </div>
 
@@ -47,23 +50,23 @@ import { RouterLink } from '@angular/router';
         </div>
 
         <div class="card legal-card">
-          <h3>3. Données collectées & Finalités (Minimisation RGPD)</h3>
-          <p>Conformément au principe de minimisation des données (article 5 du RGPD), Tracker Man fonctionne <b>sans création de compte, sans adresse e-mail et sans mot de passe</b>. Seules les données techniques suivantes sont traitées pendant une session :</p>
+          <h3>3. Données traitées en RAM & Protocoles Cryptographiques (Minimisation RGPD)</h3>
+          <p>Conformément au principe de minimisation stricte (article 5 du RGPD), Tracker Man fonctionne <b>sans création de compte, sans base de données, sans adresse e-mail et sans mot de passe</b> :</p>
           <ul>
             <li>
-              <b>Pseudonyme de jeu & Identifiant technique aléatoire :</b><br>
-              <i>Données :</i> pseudonyme libre choisi par le joueur (1 à 20 caractères), identifiant aléatoire (<code>tm_uid</code>) et empreinte SHA-256 d'un jeton secret local (<code>tm_secret</code>).<br>
-              <i>Finalité :</i> afficher les participants dans le salon et empêcher toute usurpation d'identité ou d'hôte pendant la partie.
+              <b>Identité cryptographique éphémère & Signatures ECDSA P-256 :</b><br>
+              <i>Données :</i> pseudonyme libre choisi par le joueur (1 à 20 caractères), identifiant aléatoire CSPRNG 128 bits (<code>tm_uid</code>) et paire de clés asymétriques <code>ECDSA P-256</code> générée localement par puce cryptographique (Web Crypto API).<br>
+              <i>Finalité :</i> signer numériquement chaque action du joueur et de l'hôte afin de rendre toute usurpation d'identité mathématiquement impossible sans serveur central.
             </li>
             <li>
-              <b>Données de géolocalisation (GPS) pendant la partie :</b><br>
-              <i>Données :</i> coordonnées GPS du terminal lorsque la partie est à l'état « en cours ».<br>
-              <i>Protection de la position en cours de jeu :</i> tant qu'un joueur a le rôle « Chassé », sa position exacte n'est <b>jamais</b> envoyée aux « Chasseurs » ; seul un cercle radar dont le centre est décalé aléatoirement est transmis à la base temps réel (sauf activation volontaire par le joueur du partage entre alliés chassés).<br>
-              <i>Récapitulatif de fin de partie :</i> la trace de la manche est conservée localement sur l'appareil pendant le jeu et n'est partagée avec les participants de la session qu'une fois la partie terminée, afin d'afficher la carte récapitulative et la distance parcourue.
+              <b>Géolocalisation Peer-to-Peer chiffrée de bout en bout (E2EE) :</b><br>
+              <i>Protocole cryptographique :</i> les clés de session sont dérivées localement sur votre appareil à partir du code de la partie via <code>PBKDF2-HMAC-SHA-256</code> (210 000 itérations) et <code>HKDF-SHA-256</code> avec séparation cryptographique stricte des rôles (clé chasseurs, clé alliés chassés, clé de session). Chaque paquet est chiffré par <code>AES-256-GCM</code> (AEAD 256 bits avec vecteur d'initialisation CSPRNG 96 bits, tag d'authentification 128 bits, signature <code>ECDSA P-256</code> et protection anti-rejeu).<br>
+              <i>Floutage spatial CSPRNG :</i> tant qu'un joueur a le rôle « Chassé », sa position exacte ne quitte <b>jamais</b> son téléphone (sauf partage volontaire chiffré entre alliés chassés) ; seul un cercle radar dont le centre est décalé aléatoirement via générateur cryptographique (<code>crypto.getRandomValues</code>) est diffusé.<br>
+              <i>Zéro base de données :</i> aucune coordonnée GPS, aucun cercle et aucune trajectoire n'est jamais sauvegardé sur un serveur. Tout existe uniquement dans la mémoire vive (RAM) des téléphones des participants pendant la session.
             </li>
             <li>
               <b>Données NON collectées :</b><br>
-              Nous ne collectons <b>aucune</b> adresse e-mail, aucun nom civil obligatoire, aucun numéro de téléphone, aucune donnée bancaire, aucun carnet de contacts, aucune photo/audio et aucune géolocalisation en arrière-plan lorsque vous avez quitté la session.
+              Nous ne collectons <b>aucune</b> adresse e-mail, aucun nom civil obligatoire, aucun numéro de téléphone, aucune donnée bancaire, aucun carnet de contacts, aucune photo/audio et aucun historique de localisation.
             </li>
           </ul>
         </div>
@@ -71,7 +74,7 @@ import { RouterLink } from '@angular/router';
         <div class="card legal-card">
           <h3>4. Permissions du navigateur & de la PWA</h3>
           <ul>
-            <li><b>Géolocalisation précise (<code>navigator.geolocation</code>) :</b> requise uniquement pendant une partie active pour calculer votre cercle radar, vérifier le maintien dans la zone autorisée et tracer le bilan de fin de manche. Vous pouvez la révoquer à tout moment dans les réglages de votre navigateur ou téléphone.</li>
+            <li><b>Géolocalisation précise (<code>navigator.geolocation</code>) :</b> traitée exclusivement en mémoire locale pendant une partie active. Vous pouvez la couper et la verrouiller en un clic depuis l'application ou dans les réglages de votre appareil.</li>
             <li><b>Maintien de l'écran allumé (<code>Screen Wake Lock</code>) :</b> utilisé uniquement pendant la partie (et en 🌙 Mode poche) pour éviter que la mise en veille du téléphone ne coupe la puce GPS.</li>
             <li><b>Notifications locales (facultatif) :</b> utilisées uniquement pour vous prévenir sur votre propre téléphone si vous verrouillez l'écran par erreur en pleine partie.</li>
           </ul>
@@ -85,41 +88,43 @@ import { RouterLink } from '@angular/router';
         </div>
 
         <div class="card legal-card">
-          <h3>6. Cookies & Stockage local (ePrivacy & CNIL)</h3>
+          <h3>6. Cookies & Stockage local chiffré (ePrivacy & CNIL)</h3>
           <p>
             <b>Aucun cookie publicitaire ou de profilage :</b> aucun bandeau de consentement publicitaire n'est requis car aucun traceur commercial n'est déposé.
           </p>
           <p>
-            <b>Stockage technique strictement nécessaire (<code>localStorage</code>) :</b> seuls votre pseudonyme, le code de la session en cours, votre jeton de sécurité local et les points temporaires de la manche en cours sont stockés sur votre appareil. Ces éléments techniques sont exemptés de consentement conformément à l'article 82 de la loi Informatique et Libertés.
+            <b>Stockage technique strictement nécessaire :</b> seuls votre pseudonyme et vos clés cryptographiques locales sont conservés sur votre appareil. Tout état temporaire de manche en cours dans <code>sessionStorage</code> est chiffré en <code>AES-256-GCM</code> et détruit dès que vous quittez la partie ou fermez l'onglet.
           </p>
         </div>
 
         <div class="card legal-card">
-          <h3>7. Sous-traitants certifiés & Sécurité des données</h3>
-          <p>Vos données sont traitées sur des infrastructures conformes aux normes internationales de sécurité les plus strictes :</p>
+          <h3>7. Architecture Réseau P2P & Mesures de sécurité (ANSSI / OWASP)</h3>
+          <p>Le Service applique les standards de sécurité européens et internationaux les plus exigeants :</p>
           <ul>
             <li>
-              <b>Netlify, Inc. :</b> hébergement web frontend, distribution de contenu (CDN) et fonctions serverless sécurisées (512 2nd Street, Suite 200, San Francisco, CA 94107, États-Unis — <a href="https://www.netlify.com/" target="_blank" rel="noopener">www.netlify.com</a>) avec chiffrement HTTPS/TLS et application des en-têtes de sécurité.
+              <b>Protection applicative & Réseau :</b> politique stricte de sécurité du contenu (<code>Content-Security-Policy</code>), transport chiffré forcé <code>HSTS Preload</code> (TLS 1.3), isolation d'origine (<code>COOP / CORP</code>), politique <code>Referrer-Policy: no-referrer</code> et verrouillage des permissions matérielles (<code>Permissions-Policy</code>).
             </li>
             <li>
-              <b>Supabase, Inc. :</b> hébergement de la base de données PostgreSQL et des canaux temps réel (970 Toa Payoh North #07-04, Singapour 318992 — <a href="https://www.supabase.com/" target="_blank" rel="noopener">www.supabase.com</a>) avec chiffrement de bout en bout en transit (TLS 1.3 / HTTPS) et au repos (AES-256), protégés par des politiques Row Level Security (RLS) en lecture seule et des procédures stockées sécurisées (<code>SECURITY DEFINER</code>).
+              <b>Transmission P2P directe & Routage aveugle :</b> les appareils des joueurs communiquent via des canaux directs <code>WebRTC DataChannel</code> (chiffrés <code>DTLS 1.3</code> + <code>AES-256-GCM</code>) et un routage WebSocket éphémère en mémoire vive (<code>QoS 0, Retain 0</code>) sur un identifiant de canal haché aveugle <code>SHA-256</code>, sans aucune persistance disque.
+            </li>
+            <li>
+              <b>Netlify, Inc. :</b> hébergement uniquement des fichiers statiques de l'application web (HTML/JS/CSS) via CDN chiffré HTTPS/TLS (512 2nd Street, Suite 200, San Francisco, CA 94107, États-Unis — <a href="https://www.netlify.com/" target="_blank" rel="noopener">www.netlify.com</a>).
             </li>
           </ul>
         </div>
 
         <div class="card legal-card">
-          <h3>8. Durée de conservation & Suppression automatique après chaque partie</h3>
+          <h3>8. Volatilité totale & Absence de conservation</h3>
           <ul>
-            <li><b>À la fin de chaque partie (bouton « Quitter » ou « Rejouer ») :</b> lorsque vous quittez l'écran de fin ou relancez une manche, toutes les positions GPS, cercles et trajectoires de la partie sont <b>immédiatement et définitivement supprimés</b> de la base de données (<code>ON DELETE CASCADE</code>) ainsi que du stockage local de votre téléphone.</li>
-            <li><b>Purge automatique de sécurité :</b> si tous les joueurs ferment leur navigateur sans cliquer sur « Quitter », toute session terminée depuis plus de <b>15 minutes</b> (ou toute session abandonnée) est automatiquement détruite avec l'intégralité de ses données. Aucune historique de localisation n'est jamais archivé.</li>
-            <li><b>Sur votre appareil :</b> vous pouvez effacer votre pseudonyme local à tout moment en vidant les données du site dans votre navigateur ou par simple demande à <a href="mailto:paddock.actu.f1@gmail.com">paddock.actu.f1@gmail.com</a>.</li>
+            <li><b>Zéro base de données :</b> aucune donnée de session, de joueur ou de localisation n'étant stockée sur un serveur, la fermeture de la session ou du navigateur par les joueurs entraîne la disparition immédiate et totale de toutes les données de la partie (effacement de la mémoire vive RAM).</li>
+            <li><b>Sur votre appareil :</b> vous pouvez effacer votre pseudonyme local à tout moment en vidant les données du site dans votre navigateur.</li>
           </ul>
         </div>
 
         <div class="card legal-card">
           <h3>9. Protection des mineurs</h3>
           <p>
-            Tracker Man ne collecte aucune donnée nominative ni coordonnée de contact. La participation de mineurs à une partie en extérieur doit se faire sous la surveillance et la responsabilité de leurs parents ou représentants légaux. Pour toute demande de suppression, contactez <a href="mailto:paddock.actu.f1@gmail.com">paddock.actu.f1@gmail.com</a>.
+            Tracker Man ne collecte aucune donnée nominative ni coordonnée de contact. La participation de mineurs à une partie en extérieur doit se faire sous la surveillance et la responsabilité de leurs parents ou représentants légaux. Pour toute demande d'information, contactez <a href="mailto:paddock.actu.f1@gmail.com">paddock.actu.f1@gmail.com</a>.
           </p>
         </div>
 

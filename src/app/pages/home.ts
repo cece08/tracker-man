@@ -1,6 +1,7 @@
 import { Component, inject, signal } from '@angular/core';
 import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { GameService } from '../core/game.service';
+import { sanitizeName } from '../core/crypto.service';
 import { ToastService } from '../core/toast.service';
 import { PwaService } from '../core/pwa.service';
 
@@ -18,15 +19,6 @@ import { PwaService } from '../core/pwa.service';
             Cache-toi ou pars à la recherche de tes amis dans la vraie vie : les chercheurs traquent les cachés grâce à des zones radar qui rétrécissent au fil du temps !
           </p>
         </div>
-
-        <div class="card maintenance-card" role="alert">
-          <strong>🛠️ Maintenance en cours</strong>
-          <p>Une mise à jour est en cours : réouverture prévue le 12 novembre.</p>
-        </div>
-
-        @if (maintenanceError()) {
-          <p class="error center" role="alert">⚠️ {{ maintenanceError() }}</p>
-        }
 
         @if (savedCode()) {
           <button class="btn secondary big" (click)="resume()">↩️ Reprendre la partie {{ savedCode() }}</button>
@@ -83,9 +75,6 @@ export class HomePage {
   readonly fromQr = signal(false);
   readonly savedCode = signal(localStorage.getItem('tm_code'));
   readonly busy = signal(false);
-  readonly maintenanceError = signal<string | null>(null);
-
-  private readonly maintenanceMsg = 'Une mise à jour est en cours : réouverture prévue le 12 novembre';
 
   constructor() {
     const route = inject(ActivatedRoute);
@@ -93,17 +82,14 @@ export class HomePage {
     if (paramCode.length === 6) {
       this.code.set(paramCode);
       this.fromQr.set(true);
-      this.showMaintenance();
+      if (this.name().trim() && this.game.configured) {
+        setTimeout(() => this.join(), 150);
+      }
     }
   }
 
-  private showMaintenance() {
-    this.maintenanceError.set(this.maintenanceMsg);
-    this.toast.show('⚠️ ' + this.maintenanceMsg, 4500);
-  }
-
   onNameEnter() {
-    this.showMaintenance();
+    if (this.code().length === 6) this.join();
   }
 
   onCode(e: Event) {
@@ -112,15 +98,35 @@ export class HomePage {
     this.code.set(input.value);
   }
 
+  private checkName(): string | null {
+    const n = sanitizeName(this.name());
+    if (!n) { this.toast.show("Entre ton pseudo d'abord 🙂"); return null; }
+    if (!this.game.configured) { this.toast.show("Supabase n'est pas configuré (voir README)."); return null; }
+    try { localStorage.setItem('tm_name', n); } catch { /* ignore */ }
+    return n;
+  }
+
   goCreate() {
-    this.showMaintenance();
+    if (this.checkName()) this.router.navigate(['/create']);
   }
 
   resume() {
-    this.showMaintenance();
+    this.router.navigate(['/session', this.savedCode()]);
   }
 
   async join() {
-    this.showMaintenance();
+    const name = this.checkName();
+    if (!name) return;
+    const code = this.code().trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (code.length !== 6) return this.toast.show('Le code fait 6 caractères.');
+    this.busy.set(true);
+    try {
+      await this.game.join(code, name);
+      this.router.navigate(['/session', code]);
+    } catch (e) {
+      this.toast.show((e as Error).message);
+    } finally {
+      this.busy.set(false);
+    }
   }
 }

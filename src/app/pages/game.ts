@@ -232,7 +232,7 @@ export class GameView implements AfterViewInit, OnDestroy {
   ngAfterViewInit() {
     this.map = L.map(this.mapEl().nativeElement, { zoomControl: false }).setView([46.6, 2.4], 6);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19, attribution: '© OpenStreetMap',
+      maxZoom: 19, attribution: '© OpenStreetMap', crossOrigin: 'anonymous',
     }).addTo(this.map);
     setTimeout(() => this.map?.invalidateSize(), 100);
     this.ready.set(true);

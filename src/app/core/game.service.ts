@@ -1,8 +1,8 @@
 import { Injectable, computed, effect, inject, signal, untracked } from '@angular/core';
-import { createClient, RealtimeChannel, SupabaseClient } from '@supabase/supabase-js';
-import { SUPABASE_ANON_KEY, SUPABASE_CONFIGURED, SUPABASE_URL } from '../supabase.config';
 import { AllyShareMode, Circle, GameEvent, Player, Pos, Role, Session, Settings } from './models';
-import { destPoint, distance, random4, randomCode, vibrate } from './utils';
+import { destPoint, distance, randomCode, secureRandomUnit, secureShuffle, vibrate } from './utils';
+import { CryptoService, E2eeEnvelope, isValidLatLng, isValidRadius, sanitizeName } from './crypto.service';
+import { P2pSessionMesh, RtcSignalPayload } from './p2p-transport';
 import { ToastService } from './toast.service';
 
 export interface MyPos { lat: number; lng: number; acc: number; }
@@ -22,37 +22,49 @@ export function shrinkInfo(s: Session | null, t: number): { radius: number; next
   return { radius, next: next && next < s.end_at ? next : null };
 }
 
+/** Identifiant technique 128 bits généré par CSPRNG (Web Crypto API). */
 function getUid(): string {
   let uid = localStorage.getItem('tm_uid');
-  if (!uid) {
-    uid = 'p' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
-    localStorage.setItem('tm_uid', uid);
+  if (!uid || !/^p[a-z0-9]{12,40}$/.test(uid)) {
+    const bytes = new Uint8Array(12);
+    crypto.getRandomValues(bytes);
+    uid = 'p' + Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+    try { localStorage.setItem('tm_uid', uid); } catch { /* ignore */ }
   }
   return uid;
 }
 
-/** Jeton secret 256 bits propre à l'appareil : stocké uniquement en local, son hash SHA-256 est vérifié côté serveur. */
+/** Jeton secret 256 bits (CSPRNG) propre à l'appareil : stocké uniquement en local. */
 function getSecret(): string {
   let sec = localStorage.getItem('tm_secret');
-  if (!sec || sec.length < 32) {
+  if (!sec || !/^[0-9a-f]{64}$/.test(sec)) {
     const bytes = new Uint8Array(32);
     crypto.getRandomValues(bytes);
     sec = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
-    localStorage.setItem('tm_secret', sec);
+    try { localStorage.setItem('tm_secret', sec); } catch { /* ignore */ }
   }
   return sec;
+}
+
+interface EncryptedSnapshot {
+  session: Session;
+  players: Record<string, Player>;
+  events: GameEvent[];
+  myTrack: Pos[];
+  lastCircle: Circle | null;
 }
 
 @Injectable({ providedIn: 'root' })
 export class GameService {
   private toast = inject(ToastService);
+  private crypto = inject(CryptoService);
 
-  readonly configured = SUPABASE_CONFIGURED;
-  private readonly sb: SupabaseClient | null = SUPABASE_CONFIGURED ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
+  /** Mode 100 % autonome P2P (aucune base de données ni serveur requis). */
+  readonly configured = true;
   readonly uid = getUid();
   private readonly secret = getSecret();
 
-  // ---- État réactif ----
+  // ---- État réactif (100 % en mémoire vive RAM) ----
   readonly code = signal<string | null>(null);
   readonly session = signal<Session | null>(null);
   readonly players = signal<Record<string, Player>>({});
@@ -98,15 +110,17 @@ export class GameService {
   readonly shrink = computed(() => shrinkInfo(this.session(), this.now()));
   readonly remaining = computed(() => (this.session()?.end_at ?? 0) - this.now());
 
-  // ---- Interne ----
+  // ---- Interne P2P & Anti-Bruteforce ----
   private offset = 0;
-  private channel: RealtimeChannel | null = null;
+  private mesh: P2pSessionMesh | null = null;
+  private peerLastSeen = new Map<string, number>();
   private openedAt = 0;
   private playing = false;
   private watchId: number | null = null;
   private wakeLock: { release(): Promise<void> } | null = null;
   private lastPosWrite = 0;
-  private lastSeenWrite = 0;
+  private lastCircleBroadcast = 0;
+  private lastHeartbeatAt = 0;
   private lastCircle: Circle | null = null;
   private lastRadius: number | null = null;
   private wasHead: boolean | null = null;
@@ -117,8 +131,14 @@ export class GameService {
   private trackFlushed = false;
   private lastValidGps: { lat: number; lng: number; t: number } | null = null;
   private lastAllyBroadcast = 0;
+  private myCurrentCommitment = '';
+  private failedCatchAttempts = 0;
+  private catchLockedUntil = 0;
+  private joinResolvers: Array<{ resolve: () => void; reject: (err: Error) => void }> = [];
+  private openTimeout: ReturnType<typeof setTimeout> | null = null;
 
   constructor() {
+    this.purgeLegacyStorage();
     setInterval(() => this.now.set(this.serverNow()), 1000);
 
     // Démarre / arrête le GPS selon l'état de la partie
@@ -128,16 +148,22 @@ export class GameService {
       untracked(() => {
         if (status === 'playing' && hasMe) this.startPlaying();
         else {
-          if (status === 'ended' && hasMe) this.flushMyTrack();
+          if (status === 'ended' && hasMe) void this.flushMyTrack();
           this.stopPlaying();
         }
       });
     });
 
-    // Boucle de jeu (chaque seconde)
+    // Boucle de jeu et présence P2P (chaque seconde)
     effect(() => {
       this.now();
       untracked(() => this.tick());
+    });
+
+    window.addEventListener('beforeunload', () => {
+      if (this.code() && this.mesh) {
+        void this.sendP2p('s', 'bye', { id: this.uid });
+      }
     });
 
     document.addEventListener('visibilitychange', () => {
@@ -154,6 +180,14 @@ export class GameService {
     });
   }
 
+  private purgeLegacyStorage() {
+    try {
+      for (const k of Object.keys(localStorage)) {
+        if (k.startsWith('tm_track_')) localStorage.removeItem(k);
+      }
+    } catch { /* ignore */ }
+  }
+
   private notifyBackgroundWarning() {
     try {
       if ('Notification' in window && Notification.permission === 'granted') {
@@ -167,194 +201,641 @@ export class GameService {
 
   serverNow() { return Date.now() + this.offset; }
 
-  private client(): SupabaseClient {
-    if (!this.sb) throw new Error("Supabase n'est pas configuré (voir README).");
-    return this.sb;
-  }
-
   // =================================================================
-  // Connexion à une session
+  // Connexion au maillage P2P E2EE (Zéro Serveur / Zéro Base de Données)
   // =================================================================
   open(code: string) {
-    const sb = this.client();
-    if (this.code() === code && this.channel) return;
+    const cleanCode = code.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (cleanCode.length !== 6) return;
+    if (this.code() === cleanCode && this.mesh) return;
+
+    const existingSession = this.session()?.code === cleanCode ? this.session() : null;
+    const existingPlayers = existingSession ? this.players() : {};
+    const existingEvents = existingSession ? this.events() : [];
+
     this.close();
-    this.code.set(code);
+    this.code.set(cleanCode);
     this.gone.set(null);
     this.openedAt = Date.now();
-    localStorage.setItem('tm_code', code);
-    this.syncClock();
+    this.peerLastSeen.set(this.uid, Date.now());
+    this.online.set(new Set([this.uid]));
+    try { localStorage.setItem('tm_code', cleanCode); } catch { /* ignore */ }
 
-    const f = `session_code=eq.${code}`;
-    const ch = sb.channel(`session-${code}`, { config: { presence: { key: this.uid } } });
-    ch.on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'sessions', filter: `code=eq.${code}` },
-        (p) => this.onSessionUpdate(p.new as Session))
-      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'sessions' },
-        (p) => { if ((p.old as Partial<Session>).code === code) this.handleGone('La session a été supprimée.'); })
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'players', filter: f },
-        (p) => this.upsertPlayer(p.new as Player))
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'players', filter: f },
-        (p) => this.upsertPlayer(p.new as Player))
-      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'players' },
-        (p) => {
-          const o = p.old as Partial<Player>;
-          if (o.session_code === code && o.id) this.removePlayer(o.id);
-        })
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'events', filter: f },
-        (p) => this.onEvent(p.new as GameEvent))
-      .on('broadcast', { event: 'ally_pos' }, ({ payload }) => this.onAllyBroadcast(payload))
-      .on('presence', { event: 'sync' }, () => this.online.set(new Set(Object.keys(ch.presenceState()))))
-      .subscribe(async (status) => {
-        if (status === 'SUBSCRIBED') {
-          await ch.track({ at: Date.now() });
-          await this.refresh();
-        }
+    if (existingSession) {
+      this.session.set(existingSession);
+      this.players.set(existingPlayers);
+      this.events.set(existingEvents);
+      this.loaded.set(true);
+    }
+
+    void this.initP2pMesh(cleanCode, !!existingSession);
+  }
+
+  private async initP2pMesh(cleanCode: string, alreadyLoaded: boolean) {
+    if (!alreadyLoaded) {
+      const restored = await this.restoreEncryptedSnapshot(cleanCode);
+      if (restored && this.code() === cleanCode) {
+        this.loaded.set(true);
+      }
+    }
+
+    await this.refreshMyCatchCodeAndCommitment(cleanCode, this.session()?.start_at ?? 0);
+    const blindTopic = await this.crypto.getBlindTopic(cleanCode, this.secret);
+    if (this.code() !== cleanCode) return;
+
+    this.mesh = new P2pSessionMesh(
+      this.uid,
+      blindTopic,
+      (env) => void this.onP2pEnvelope(env),
+      () => {
+        void this.broadcastPresenceAndSync();
+      },
+      (rtcSig) => {
+        void this.sendP2p('s', 'rtc_signal', rtcSig);
+      },
+    );
+
+    // Envoie immédiatement une requête de synchronisation / présence sur le maillage
+    void this.broadcastPresenceAndSync();
+
+    if (this.openTimeout) clearTimeout(this.openTimeout);
+    this.openTimeout = setTimeout(() => {
+      if (this.code() === cleanCode && !this.loaded()) {
+        this.handleGone('Session introuvable ou tous les participants ont quitté.');
+      }
+    }, 7500);
+  }
+
+  private async refreshMyCatchCodeAndCommitment(code: string, startAt: number) {
+    const c = await this.crypto.deriveMyCatchCode(code, startAt, this.secret, this.uid);
+    const commitment = await this.crypto.computeCatchCommitment(code, startAt, this.uid, c);
+    this.myCatchCode.set(c);
+    this.myCurrentCommitment = commitment;
+    if (this.players()[this.uid]) {
+      this.players.update((m) => ({
+        ...m,
+        [this.uid]: { ...m[this.uid], catch_commitment: commitment },
+      }));
+    }
+  }
+
+  private async broadcastPresenceAndSync() {
+    const code = this.code();
+    if (!code || !this.mesh) return;
+    const identity = await this.crypto.getDeviceIdentity();
+    const myName = sanitizeName(this.me()?.name ?? localStorage.getItem('tm_name') ?? 'Joueur');
+
+    if (!this.session() || !this.me()) {
+      await this.sendP2p('s', 'join_req', {
+        name: myName,
+        pubKey: identity.publicKeySpkiB64,
+        catchCommitment: this.myCurrentCommitment,
       });
-    this.channel = ch;
-    this.refresh();
+    } else {
+      await this.sendP2p('s', 'sync_req', { at: this.serverNow() });
+      await this.sendHeartbeat();
+      if (this.isHost()) {
+        await this.broadcastFullStateSync();
+      }
+    }
   }
 
   close() {
-    if (this.channel) this.sb?.removeChannel(this.channel);
-    this.channel = null;
+    if (this.openTimeout) clearTimeout(this.openTimeout);
+    this.openTimeout = null;
+    if (this.mesh) this.mesh.close();
+    this.mesh = null;
+    this.peerLastSeen.clear();
     this.code.set(null);
     this.session.set(null);
     this.players.set({});
     this.events.set([]);
     this.online.set(new Set());
     this.allyExactPos.set({});
+    this.crypto.clearSessionKeys();
     this.loaded.set(false);
     this.stopPlaying();
   }
 
-  /** Recharge tout l'état depuis la base. */
+  /** Synchronise l'état avec les pairs connectés en mémoire vive. */
   async refresh() {
     const code = this.code();
-    if (!code || !this.sb) return;
-    const [s, p, e] = await Promise.all([
-      this.sb.from('sessions').select('*').eq('code', code).maybeSingle(),
-      this.sb.from('players').select('*').eq('session_code', code),
-      this.sb.from('events').select('*').eq('session_code', code).order('t'),
-    ]);
-    if (this.code() !== code) return;
-    if (s.error || p.error || e.error) {
-      console.error(s.error || p.error || e.error);
-      return;
-    }
-    if (!s.data) return this.handleGone('Session introuvable.');
-    const map: Record<string, Player> = {};
-    for (const pl of p.data as Player[]) map[pl.id] = pl;
-    if (!map[this.uid]) return this.handleGone('Tu ne fais pas partie de cette session.');
-    this.session.set(s.data as Session);
-    this.players.set(map);
-    this.events.set(e.data as GameEvent[]);
-    this.loaded.set(true);
-    this.fetchMyCatchCode(map[this.uid]);
-  }
-
-  /** Récupère le code chasseur privé (depuis `player_secrets` si le schéma sécurisé est actif, sinon depuis la ligne joueur). */
-  private async fetchMyCatchCode(mePlayer?: Player) {
-    const code = this.code();
-    if (!code || !this.sb) return;
-    if (mePlayer?.catch_code && mePlayer.catch_code !== '****') {
-      this.myCatchCode.set(mePlayer.catch_code);
-      return;
-    }
-    const { data, error } = await this.sb.rpc('get_my_catch_code', {
-      p_code: code, p_id: this.uid, p_secret: this.secret,
-    });
-    if (!error && typeof data === 'string' && data) {
-      this.myCatchCode.set(data);
-    }
+    if (!code || !this.mesh) return;
+    await this.sendP2p('s', 'sync_req', { at: this.serverNow() });
+    await this.sendHeartbeat();
   }
 
   private handleGone(msg: string) {
+    const resolvers = [...this.joinResolvers];
+    this.joinResolvers = [];
+    for (const r of resolvers) r.reject(new Error(msg));
+    const c = this.code();
+    if (c) this.removeEncryptedSnapshot(c);
     this.close();
-    localStorage.removeItem('tm_code');
+    try { localStorage.removeItem('tm_code'); } catch { /* ignore */ }
     this.gone.set(msg);
     this.toast.show(msg);
   }
 
-  private onSessionUpdate(s: Session) {
-    const prev = this.session();
-    this.session.set(s);
-    if (prev?.status !== s.status) {
-      if (s.status === 'ended') this.flushMyTrack();
-      this.refresh();
-    }
+  // =================================================================
+  // Protocole de messagerie P2P E2EE (AES-256-GCM + ECDSA P-256)
+  // =================================================================
+  private async sendP2p<T>(
+    scope: 's' | 'h' | 'a',
+    type: E2eeEnvelope['t'],
+    payload: T,
+  ) {
+    const code = this.code();
+    if (!code || !this.mesh) return;
+    try {
+      const env = await this.crypto.encryptPacket(
+        code,
+        this.secret,
+        scope,
+        type,
+        this.uid,
+        this.serverNow(),
+        payload,
+      );
+      this.mesh.broadcast(env);
+    } catch { /* ignore */ }
   }
 
-  private upsertPlayer(p: Player) {
-    const prevRole = this.players()[p.id]?.role;
-    this.players.update((m) => ({ ...m, [p.id]: p }));
-    if (p.role !== 'hunted') {
-      this.allyExactPos.update((m) => {
-        const { [p.id]: _r, ...rest } = m;
-        return rest;
-      });
+  private async broadcastFullStateSync() {
+    const s = this.session();
+    if (!s) return;
+    // Nettoie les positions exactes de chasseurs dans le snapshot général (elles passent sur la clé 'h')
+    const sanitizedPlayers: Record<string, Player> = {};
+    for (const [id, pl] of Object.entries(this.players())) {
+      sanitizedPlayers[id] = {
+        ...pl,
+        catch_code: '****',
+        pos: null,
+      };
     }
-    if (p.id === this.uid && prevRole !== p.role) this.fetchMyCatchCode(p);
+    await this.sendP2p('s', 'state_sync', {
+      session: s,
+      players: sanitizedPlayers,
+      events: this.events().filter((e) => e.type !== 'pos' && e.type !== 'track'),
+    });
   }
 
-  private onAllyBroadcast(payload: { id?: string; lat?: number; lng?: number; t?: number; off?: boolean }) {
-    // Seuls les chassés traitent les positions exactes des autres chassés
-    if (this.me()?.role !== 'hunted' || !payload?.id || payload.id === this.uid) return;
-    const sender = this.players()[payload.id];
-    if (!sender || sender.role !== 'hunted') return;
-    if (payload.off || payload.lat == null || payload.lng == null) {
-      this.allyExactPos.update((m) => {
-        const { [payload.id!]: _r, ...rest } = m;
-        return rest;
-      });
-      return;
-    }
-    this.allyExactPos.update((m) => ({
-      ...m,
-      [payload.id!]: { lat: payload.lat!, lng: payload.lng!, t: payload.t ?? this.serverNow() },
-    }));
+  private async sendHeartbeat() {
+    const m = this.me();
+    if (!m) return;
+    await this.sendP2p('s', 'heartbeat', {
+      role: m.role,
+      catchCommitment: this.myCurrentCommitment,
+      seen: this.serverNow(),
+    });
   }
 
-  /** Change en direct le mode de partage de localisation avec les autres chassés ('off' | 'relative' | 'exact'). */
-  setAllyShareMode(mode: AllyShareMode) {
-    const prev = this.allyShareMode();
-    if (prev === mode) return;
-    this.allyShareMode.set(mode);
-    if (prev === 'exact' && mode !== 'exact') {
-      this.channel?.send({ type: 'broadcast', event: 'ally_pos', payload: { id: this.uid, off: true } });
+  private markPeerSeen(peerUid: string) {
+    this.peerLastSeen.set(peerUid, Date.now());
+    this.peerLastSeen.set(this.uid, Date.now());
+    this.updateOnlineSet();
+    this.mesh?.ensurePeerConnection(peerUid);
+  }
+
+  private updateOnlineSet() {
+    const now = Date.now();
+    const active = new Set<string>([this.uid]);
+    for (const [id, ts] of this.peerLastSeen.entries()) {
+      if (now - ts < 13_000) active.add(id);
     }
-    const pos = this.myPos();
-    if (pos && this.me()?.role === 'hunted') {
-      this.maybeUpdateCircle(pos, true);
-      if (mode === 'exact') {
-        this.lastAllyBroadcast = 0;
-        this.broadcastExactToAllies(pos);
+    this.online.set(active);
+  }
+
+  private async onP2pEnvelope(rawEnv: E2eeEnvelope) {
+    const code = this.code();
+    if (!code) return;
+
+    const myRole = this.me()?.role;
+    if (rawEnv.k === 'h' && myRole && myRole !== 'hunter') return;
+    if (rawEnv.k === 'a' && myRole && myRole !== 'hunted') return;
+
+    const allowHist = rawEnv.t === 'track' || rawEnv.t === 'state_sync';
+    const pkt = await this.crypto.decryptPacket<unknown>(
+      code,
+      this.secret,
+      rawEnv,
+      this.serverNow(),
+      allowHist,
+    );
+    if (!pkt || pkt.senderUid === this.uid) return;
+
+    this.markPeerSeen(pkt.senderUid);
+
+    // Vérifie qu'un pair existant utilise toujours la même clé publique ECDSA P-256 (anti-usurpation)
+    const knownPlayer = this.players()[pkt.senderUid];
+    if (knownPlayer?.pub_key && knownPlayer.pub_key !== pkt.senderPubKey) {
+      return; // Rejet immédiat : tentative d'usurpation d'identité bloquée par ECDSA P-256
+    }
+
+    switch (pkt.type) {
+      case 'rtc_signal': {
+        await this.mesh?.handleRtcSignal(pkt.senderUid, pkt.data as RtcSignalPayload);
+        return;
+      }
+
+      case 'heartbeat': {
+        const d = pkt.data as { catchCommitment?: string; seen?: number } | null;
+        if (knownPlayer && d) {
+          this.players.update((m) => ({
+            ...m,
+            [pkt.senderUid]: {
+              ...m[pkt.senderUid],
+              catch_commitment: d.catchCommitment || m[pkt.senderUid].catch_commitment,
+              seen: d.seen ?? pkt.ts,
+            },
+          }));
+        }
+        return;
+      }
+
+      case 'bye': {
+        this.peerLastSeen.delete(pkt.senderUid);
+        this.mesh?.removePeer(pkt.senderUid);
+        this.updateOnlineSet();
+        return;
+      }
+
+      case 'join_req': {
+        const d = pkt.data as { name?: string; pubKey?: string; catchCommitment?: string } | null;
+        const s = this.session();
+        if (!d || !s) return;
+        const existing = this.players()[pkt.senderUid];
+        if (existing) {
+          const cleanName = sanitizeName(d.name ?? existing.name);
+          this.players.update((m) => ({
+            ...m,
+            [pkt.senderUid]: {
+              ...existing,
+              name: cleanName,
+              pub_key: existing.pub_key ?? pkt.senderPubKey,
+              catch_commitment: d.catchCommitment || existing.catch_commitment,
+            },
+          }));
+          if (this.isHost() || !this.online().has(s.host_id)) {
+            void this.broadcastFullStateSync();
+          }
+          void this.persistEncryptedSnapshot();
+          return;
+        }
+        if (s.status !== 'lobby') {
+          if (this.isHost()) {
+            void this.sendP2p('s', 'player_kick', {
+              targetId: pkt.senderUid,
+              reason: 'La partie a déjà commencé.',
+            });
+          }
+          return;
+        }
+        if (Object.keys(this.players()).length >= 60) return;
+        const newPlayer: Player = {
+          session_code: code,
+          id: pkt.senderUid,
+          name: sanitizeName(d.name),
+          role: 'hunted',
+          initial_role: null,
+          catch_code: '****',
+          catch_commitment: d.catchCommitment ?? '',
+          pub_key: pkt.senderPubKey,
+          joined_at: pkt.ts,
+          caught_by: null,
+          caught_at: null,
+          circle: null,
+          pos: null,
+          seen: pkt.ts,
+        };
+        this.players.update((m) => ({ ...m, [pkt.senderUid]: newPlayer }));
+        if (this.isHost() || !this.online().has(s.host_id)) {
+          void this.broadcastFullStateSync();
+        }
+        void this.persistEncryptedSnapshot();
+        return;
+      }
+
+      case 'sync_req': {
+        const s = this.session();
+        if (s) {
+          if (this.isHost() || !this.online().has(s.host_id)) {
+            void this.broadcastFullStateSync();
+          }
+          this.respondRealtimeState();
+        }
+        return;
+      }
+
+      case 'state_sync': {
+        const d = pkt.data as {
+          session?: Session;
+          players?: Record<string, Player>;
+          events?: GameEvent[];
+        } | null;
+        if (!d?.session || !d.players || d.session.code !== code) return;
+
+        const curSession = this.session();
+        // N'accepte une synchronisation d'état que si nous n'avons pas encore chargé la session,
+        // ou si elle provient de l'hôte authentifié par sa clé ECDSA P-256
+        const hostPlayer = this.players()[curSession?.host_id ?? d.session.host_id] ?? d.players[d.session.host_id];
+        const isFromHost = pkt.senderUid === (curSession?.host_id ?? d.session.host_id) &&
+          (!hostPlayer?.pub_key || hostPlayer.pub_key === pkt.senderPubKey);
+        if (curSession && !isFromHost) return;
+
+        // Synchronise l'horloge avec l'hôte pour que les chronos soient identiques à la milliseconde près
+        if (isFromHost && pkt.ts) {
+          this.offset = pkt.ts - Date.now();
+        }
+
+        const mergedPlayers: Record<string, Player> = {};
+        const prevPlayers = this.players();
+        for (const [id, rawPl] of Object.entries(d.players)) {
+          const prev = prevPlayers[id];
+          mergedPlayers[id] = {
+            ...rawPl,
+            name: sanitizeName(rawPl.name),
+            catch_code: '****',
+            pos: rawPl.role === 'hunter' ? (prev?.pos ?? null) : null,
+            circle: rawPl.role === 'hunted' ? (prev?.circle ?? rawPl.circle ?? null) : null,
+            seen: prev?.seen ?? rawPl.seen ?? null,
+          };
+        }
+
+        if (!mergedPlayers[this.uid]) return;
+
+        const prevStatus = curSession?.status;
+        this.session.set(d.session);
+        this.players.set(mergedPlayers);
+
+        if (Array.isArray(d.events)) {
+          const tracks = this.events().filter((e) => e.type === 'track');
+          const incomingLogs = d.events.filter((e) => e.type !== 'pos' && e.type !== 'track');
+          for (const ev of incomingLogs) this.notifyIfNewEvent(ev);
+          this.events.set([...incomingLogs, ...tracks]);
+        }
+
+        this.loaded.set(true);
+        if (d.session.start_at && prevStatus !== d.session.status) {
+          void this.refreshMyCatchCodeAndCommitment(code, d.session.start_at);
+        }
+        const resolvers = [...this.joinResolvers];
+        this.joinResolvers = [];
+        for (const r of resolvers) r.resolve();
+        void this.persistEncryptedSnapshot();
+        return;
+      }
+
+      case 'session_patch': {
+        const s = this.session();
+        if (!s) return;
+        const d = pkt.data as Partial<Session> & { claimHost?: boolean } | null;
+        if (!d) return;
+        // Seul l'hôte actuel (ou le successeur légitime si l'hôte est hors ligne en salon) peut modifier la session
+        const isCurrentHost = pkt.senderUid === s.host_id;
+        const canClaimHost = d.claimHost && s.status === 'lobby' && !this.online().has(s.host_id);
+        if (!isCurrentHost && !canClaimHost) return;
+
+        this.session.update((cur) => (cur ? { ...cur, ...d } : cur));
+        void this.persistEncryptedSnapshot();
+        return;
+      }
+
+      case 'player_patch': {
+        const s = this.session();
+        if (!s) return;
+        const d = pkt.data as { targetId?: string; patch?: Partial<Player> } | null;
+        if (!d?.targetId || !d.patch) return;
+        const isSelf = pkt.senderUid === d.targetId;
+        const isHost = pkt.senderUid === s.host_id;
+        if (!isSelf && !isHost) return;
+
+        const target = this.players()[d.targetId];
+        if (!target) return;
+
+        const updated: Player = {
+          ...target,
+          name: d.patch.name ? sanitizeName(d.patch.name) : target.name,
+          role: isHost && (d.patch.role === 'hunter' || d.patch.role === 'hunted') ? d.patch.role : target.role,
+          catch_commitment: isSelf && d.patch.catch_commitment ? d.patch.catch_commitment : target.catch_commitment,
+        };
+        this.players.update((m) => ({ ...m, [d.targetId!]: updated }));
+        void this.persistEncryptedSnapshot();
+        return;
+      }
+
+      case 'player_kick': {
+        const s = this.session();
+        const d = pkt.data as { targetId?: string; reason?: string; voluntaryLeave?: boolean } | null;
+        if (!d?.targetId) return;
+        const isHost = s && pkt.senderUid === s.host_id;
+        const isSelfLeave = pkt.senderUid === d.targetId && d.voluntaryLeave;
+        if (!isHost && !isSelfLeave) return;
+
+        if (d.targetId === this.uid) {
+          this.handleGone(d.reason ?? "Tu as été exclu de la session par l'hôte.");
+          return;
+        }
+        this.players.update((m) => {
+          const { [d.targetId!]: _r, ...rest } = m;
+          return rest;
+        });
+        this.peerLastSeen.delete(d.targetId);
+        this.mesh?.removePeer(d.targetId);
+        this.updateOnlineSet();
+        if (s && d.targetId === s.host_id) {
+          const nextHost = this.sortedPlayers()[0]?.id;
+          if (nextHost) this.session.update((cur) => (cur ? { ...cur, host_id: nextHost } : cur));
+        }
+        void this.persistEncryptedSnapshot();
+        return;
+      }
+
+      case 'start_game': {
+        const s = this.session();
+        if (!s || pkt.senderUid !== s.host_id) return;
+        const d = pkt.data as { startAt: number; endAt: number; hunters: string[]; event: GameEvent } | null;
+        if (!d || !Array.isArray(d.hunters)) return;
+
+        this.offset = pkt.ts - Date.now();
+        await this.applyStartGame(d.startAt, d.endAt, d.hunters, d.event);
+        return;
+      }
+
+      case 'caught': {
+        const s = this.session();
+        if (!s || s.status !== 'playing') return;
+        const d = pkt.data as { victimId: string; hunterId: string; caughtAt: number; event: GameEvent } | null;
+        if (!d || pkt.senderUid !== d.victimId) return;
+        this.applyPlayerCaught(d.victimId, d.hunterId, d.caughtAt, d.event);
+        return;
+      }
+
+      case 'out_of_zone': {
+        const s = this.session();
+        if (!s || s.status !== 'playing') return;
+        const d = pkt.data as { victimId: string; caughtAt: number; event: GameEvent } | null;
+        if (!d || pkt.senderUid !== d.victimId) return;
+        this.applyPlayerCaught(d.victimId, 'ZONE', d.caughtAt, d.event);
+        return;
+      }
+
+      case 'end_game': {
+        const s = this.session();
+        if (!s || s.status !== 'playing') return;
+        const d = pkt.data as { endedAt: number; winner: 'hunted' | 'hunters' } | null;
+        if (!d) return;
+        this.applyEndGame(d.endedAt, d.winner);
+        return;
+      }
+
+      case 'reset_game': {
+        const s = this.session();
+        if (!s || pkt.senderUid !== s.host_id) return;
+        this.applyResetGame();
+        return;
+      }
+
+      case 'hunter_pos': {
+        if (pkt.scope !== 'h' || !knownPlayer || knownPlayer.role !== 'hunter') return;
+        const d = pkt.data as { lat?: number; lng?: number; t?: number; off?: boolean } | null;
+        if (d?.off) {
+          this.players.update((m) =>
+            m[pkt.senderUid] ? { ...m, [pkt.senderUid]: { ...m[pkt.senderUid], pos: null } } : m,
+          );
+          return;
+        }
+        if (!d || !isValidLatLng(d.lat, d.lng)) return;
+        const pos: Pos = { lat: d.lat!, lng: d.lng!, t: pkt.ts };
+        this.players.update((m) =>
+          m[pkt.senderUid] ? { ...m, [pkt.senderUid]: { ...m[pkt.senderUid], pos, seen: pkt.ts } } : m,
+        );
+        return;
+      }
+
+      case 'circle': {
+        if (pkt.scope !== 's' || !knownPlayer || knownPlayer.role !== 'hunted') return;
+        const d = pkt.data as { circle?: Circle | null } | null;
+        if (!d || d.circle === null) {
+          this.players.update((m) =>
+            m[pkt.senderUid] ? { ...m, [pkt.senderUid]: { ...m[pkt.senderUid], circle: null } } : m,
+          );
+          return;
+        }
+        const c = d.circle;
+        if (!c || !isValidLatLng(c.lat, c.lng) || !isValidRadius(c.r)) return;
+        const validCircle: Circle = {
+          lat: c.lat,
+          lng: c.lng,
+          r: Math.round(c.r),
+          t: typeof c.t === 'number' && Number.isFinite(c.t) ? c.t : pkt.ts,
+          allyShare: !!c.allyShare,
+        };
+        this.players.update((m) =>
+          m[pkt.senderUid]
+            ? { ...m, [pkt.senderUid]: { ...m[pkt.senderUid], circle: validCircle, seen: pkt.ts } }
+            : m,
+        );
+        return;
+      }
+
+      case 'ally_pos': {
+        if (pkt.scope !== 'a' || this.me()?.role !== 'hunted' || !knownPlayer || knownPlayer.role !== 'hunted') return;
+        const d = pkt.data as { lat?: number; lng?: number; t?: number; off?: boolean } | null;
+        if (!d || d.off || !isValidLatLng(d.lat, d.lng)) {
+          this.allyExactPos.update((m) => {
+            const { [pkt.senderUid]: _r, ...rest } = m;
+            return rest;
+          });
+          return;
+        }
+        this.allyExactPos.update((m) => ({
+          ...m,
+          [pkt.senderUid]: { lat: d.lat!, lng: d.lng!, t: pkt.ts },
+        }));
+        return;
+      }
+
+      case 'track': {
+        if (!knownPlayer) return;
+        const d = pkt.data as { playerName?: string; points?: Pos[] } | null;
+        if (!d || !Array.isArray(d.points) || d.points.length === 0 || d.points.length > 5000) return;
+        const validPoints: Pos[] = [];
+        for (const pt of d.points) {
+          if (pt && isValidLatLng(pt.lat, pt.lng) && typeof pt.t === 'number' && Number.isFinite(pt.t)) {
+            validPoints.push({
+              lat: Number(pt.lat.toFixed(5)),
+              lng: Number(pt.lng.toFixed(5)),
+              t: pt.t,
+              role: pt.role === 'hunter' ? 'hunter' : 'hunted',
+            });
+          }
+        }
+        if (!validPoints.length) return;
+        this.recordTrackEvent(pkt.senderUid, sanitizeName(d.playerName ?? knownPlayer.name), validPoints, pkt.ts);
+        return;
       }
     }
   }
 
-  private broadcastExactToAllies(pos: MyPos) {
-    if (this.allyShareMode() !== 'exact' || this.me()?.role !== 'hunted' || !this.channel) return;
-    const t = this.serverNow();
-    if (t - this.lastAllyBroadcast < 3000) return;
-    this.lastAllyBroadcast = t;
-    this.channel.send({
-      type: 'broadcast',
-      event: 'ally_pos',
-      payload: { id: this.uid, lat: pos.lat, lng: pos.lng, t },
+  private respondRealtimeState() {
+    const s = this.session();
+    const m = this.me();
+    if (!s || !m) return;
+    if (s.status === 'playing') {
+      const pos = this.myPos();
+      if (m.role === 'hunter' && pos) {
+        void this.sendP2p('h', 'hunter_pos', {
+          lat: Number(pos.lat.toFixed(5)),
+          lng: Number(pos.lng.toFixed(5)),
+          t: this.serverNow(),
+        });
+      } else if (m.role === 'hunted' && this.lastCircle) {
+        void this.sendP2p('s', 'circle', { circle: this.lastCircle });
+        if (this.allyShareMode() === 'exact' && pos) {
+          void this.sendP2p('a', 'ally_pos', {
+            lat: Number(pos.lat.toFixed(5)),
+            lng: Number(pos.lng.toFixed(5)),
+            t: this.serverNow(),
+          });
+        }
+      }
+    } else if (s.status === 'ended' && this.myTrack.length > 0) {
+      void this.sendP2p('s', 'track', {
+        playerName: m.name,
+        points: this.myTrack,
+      });
+    }
+  }
+
+  private recordTrackEvent(playerId: string, playerName: string, points: Pos[], t: number) {
+    const code = this.code();
+    if (!code) return;
+    const syntheticId = -Math.abs(this.hashString(playerId));
+    const ev: GameEvent = {
+      id: syntheticId,
+      session_code: code,
+      type: 'track',
+      t,
+      data: { playerId, playerName, points },
+    };
+    this.events.update((list) => {
+      const filtered = list.filter((x) => !(x.type === 'track' && x.data.playerId === playerId));
+      return [...filtered, ev];
     });
   }
 
-  private removePlayer(id: string) {
-    if (id === this.uid) return this.handleGone("Tu as été exclu de la session par l'hôte.");
-    this.players.update((m) => {
-      const { [id]: _removed, ...rest } = m;
-      return rest;
-    });
+  private hashString(str: string): number {
+    let h = 2166136261;
+    for (let i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return h | 1;
   }
 
-  private onEvent(e: GameEvent) {
+  private notifyIfNewEvent(e: GameEvent) {
     if (this.events().some((x) => x.id === e.id)) return;
-    this.events.update((l) => [...l, e]);
     if (e.type === 'caught') {
       vibrate([200, 100, 200]);
       if (e.data.victim === this.uid) this.toast.show('Tu es maintenant chasseur 🔴 !');
@@ -369,205 +850,427 @@ export class GameService {
     }
   }
 
-  private async syncClock() {
-    if (!this.sb) return;
-    const t0 = Date.now();
-    const { data, error } = await this.sb.rpc('server_now');
-    const t1 = Date.now();
-    if (!error && typeof data === 'number') this.offset = data + (t1 - t0) / 2 - t1;
+  /** Change en direct le mode de partage de localisation avec les autres chassés ('off' | 'relative' | 'exact'). */
+  setAllyShareMode(mode: AllyShareMode) {
+    const prev = this.allyShareMode();
+    if (prev === mode) return;
+    this.allyShareMode.set(mode);
+    if (prev === 'exact' && mode !== 'exact') {
+      void this.sendP2p('a', 'ally_pos', { off: true });
+    }
+    const pos = this.myPos();
+    if (pos && this.me()?.role === 'hunted') {
+      this.maybeUpdateCircle(pos, true);
+      if (mode === 'exact') {
+        this.lastAllyBroadcast = 0;
+        this.broadcastExactToAllies(pos);
+      }
+    }
+  }
+
+  private broadcastExactToAllies(pos: MyPos) {
+    if (this.allyShareMode() !== 'exact' || this.me()?.role !== 'hunted' || !this.mesh) return;
+    const t = this.serverNow();
+    if (t - this.lastAllyBroadcast < 3000) return;
+    this.lastAllyBroadcast = t;
+    void this.sendP2p('a', 'ally_pos', {
+      lat: Number(pos.lat.toFixed(5)),
+      lng: Number(pos.lng.toFixed(5)),
+      t,
+    });
   }
 
   // =================================================================
-  // Actions (compatibles avec le schéma sécurisé RPC + fallback ancien schéma)
+  // Actions de session 100 % P2P (Zéro Base de Données)
   // =================================================================
   async createSession(name: string, settings: Settings): Promise<string> {
-    const sb = this.client();
+    const cleanName = sanitizeName(name);
     this.clearLocalTracks();
-    sb.rpc('cleanup_old_sessions').then();
-    let code = '';
-    for (let i = 0; i < 8; i++) {
-      code = randomCode();
-      const rpc = await sb.rpc('create_session_secure', {
-        p_code: code, p_host_id: this.uid, p_secret: this.secret, p_name: name, p_settings: settings,
-      });
-      if (!rpc.error) return code;
-      // Si la fonction RPC sécurisée n'a pas encore été installée dans Supabase, fallback sur l'insertion classique
-      if (rpc.error.code === 'PGRST202') {
-        const ins = await sb.from('sessions').insert({ code, host_id: this.uid, status: 'lobby', settings });
-        if (!ins.error) {
-          const pl = await sb.from('players').insert({
-            session_code: code, id: this.uid, name, catch_code: random4(), joined_at: Date.now(),
-          });
-          if (pl.error) throw new Error(pl.error.message);
-          return code;
-        }
-        if (ins.error.code !== '23505' || i === 7) throw new Error(ins.error.message);
-      } else if (rpc.error.code !== '23505' || i === 7) {
-        throw new Error(rpc.error.message);
-      }
-    }
+    const code = randomCode();
+    const identity = await this.crypto.getDeviceIdentity();
+    const now = Date.now();
+    await this.refreshMyCatchCodeAndCommitment(code, 0);
+
+    const newSession: Session = {
+      code,
+      host_id: this.uid,
+      status: 'lobby',
+      settings: { ...settings },
+      start_at: null,
+      end_at: null,
+      winner: null,
+      ended_at: null,
+    };
+
+    const hostPlayer: Player = {
+      session_code: code,
+      id: this.uid,
+      name: cleanName,
+      role: 'hunted',
+      initial_role: null,
+      catch_code: '****',
+      catch_commitment: this.myCurrentCommitment,
+      pub_key: identity.publicKeySpkiB64,
+      joined_at: now,
+      caught_by: null,
+      caught_at: null,
+      circle: null,
+      pos: null,
+      seen: now,
+    };
+
+    this.code.set(code);
+    this.session.set(newSession);
+    this.players.set({ [this.uid]: hostPlayer });
+    this.events.set([]);
+    this.loaded.set(true);
+    await this.persistEncryptedSnapshot();
+    this.open(code);
     return code;
   }
 
-  async join(code: string, name: string) {
-    const sb = this.client();
-    const res = await sb.rpc('join_session', {
-      p_code: code, p_id: this.uid, p_name: name, p_secret: this.secret,
-    });
-    if (res.error?.code === 'PGRST202') {
-      const legacy = await sb.rpc('join_session', { p_code: code, p_id: this.uid, p_name: name });
-      if (legacy.error) throw new Error(legacy.error.message);
+  async join(code: string, name: string): Promise<void> {
+    const cleanCode = code.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const cleanName = sanitizeName(name);
+    if (cleanCode.length !== 6) throw new Error('Le code fait 6 caractères.');
+
+    // Si on est déjà connecté à cette session sur cet appareil
+    if (this.session()?.code === cleanCode && this.players()[this.uid]) {
+      await this.renamePlayer(this.uid, cleanName);
       return;
     }
-    if (res.error) throw new Error(res.error.message);
+
+    const restored = await this.restoreEncryptedSnapshot(cleanCode);
+    if (restored && this.players()[this.uid]) {
+      this.open(cleanCode);
+      await this.renamePlayer(this.uid, cleanName);
+      return;
+    }
+
+    this.open(cleanCode);
+    const identity = await this.crypto.getDeviceIdentity();
+    await this.refreshMyCatchCodeAndCommitment(cleanCode, 0);
+
+    return new Promise<void>((resolve, reject) => {
+      this.joinResolvers.push({ resolve, reject });
+      const retryInterval = setInterval(() => {
+        if (this.session()?.code === cleanCode && this.players()[this.uid]) {
+          clearInterval(retryInterval);
+          return;
+        }
+        void this.sendP2p('s', 'join_req', {
+          name: cleanName,
+          pubKey: identity.publicKeySpkiB64,
+          catchCommitment: this.myCurrentCommitment,
+        });
+      }, 650);
+
+      setTimeout(() => {
+        clearInterval(retryInterval);
+        const idx = this.joinResolvers.findIndex((r) => r.resolve === resolve);
+        if (idx !== -1) {
+          this.joinResolvers.splice(idx, 1);
+          this.close();
+          reject(new Error('Session introuvable ou aucun joueur en ligne.'));
+        }
+      }, 5500);
+    });
   }
 
   async leave() {
     const code = this.code();
-    const s = this.session();
-    const wasHostEnded = s?.status === 'ended' && s?.host_id === this.uid;
+    if (code && this.mesh) {
+      await this.sendP2p('s', 'player_kick', {
+        targetId: this.uid,
+        voluntaryLeave: true,
+      });
+      await this.sendP2p('s', 'bye', { id: this.uid });
+      this.removeEncryptedSnapshot(code);
+    }
     this.clearLocalTracks();
     this.close();
-    localStorage.removeItem('tm_code');
-    if (!code) return;
-    const sb = this.client();
-    const res = await sb.rpc('leave_session', { p_code: code, p_id: this.uid, p_secret: this.secret });
-    if (res.error?.code === 'PGRST202') {
-      await sb.rpc('leave_session', { p_code: code, p_id: this.uid });
-      if (wasHostEnded) await sb.from('sessions').delete().eq('code', code);
-    }
-    sb.rpc('cleanup_old_sessions').then();
+    try { localStorage.removeItem('tm_code'); } catch { /* ignore */ }
   }
 
   private clearLocalTracks() {
+    this.myTrack = [];
+    this.lastCircle = null;
+    this.purgeLegacyStorage();
     try {
-      for (const k of Object.keys(localStorage)) {
-        if (k.startsWith('tm_track_')) localStorage.removeItem(k);
+      for (const k of Object.keys(sessionStorage)) {
+        if (k.startsWith('tm_e2ee_') || k.startsWith('tm_snap_') || k.startsWith('tm_track_')) {
+          sessionStorage.removeItem(k);
+        }
       }
     } catch { /* ignore */ }
   }
 
   async toggleRole(p: Player) {
+    if (!this.isHost()) return;
     const role: Role = p.role === 'hunter' ? 'hunted' : 'hunter';
-    const sb = this.client();
-    const res = await sb.rpc('toggle_role_secure', {
-      p_code: p.session_code, p_host_id: this.uid, p_secret: this.secret, p_target_id: p.id, p_role: role,
-    });
-    if (res.error?.code === 'PGRST202') {
-      await sb.from('players').update({ role }).eq('session_code', p.session_code).eq('id', p.id);
-    } else if (res.error) {
-      throw new Error(res.error.message);
-    }
+    this.players.update((m) => (m[p.id] ? { ...m, [p.id]: { ...m[p.id], role } } : m));
+    await this.sendP2p('s', 'player_patch', { targetId: p.id, patch: { role } });
+    await this.persistEncryptedSnapshot();
   }
 
   async updateSettings(settings: Settings) {
-    const code = this.code();
-    if (!code) return;
-    const sb = this.client();
-    const res = await sb.rpc('update_settings_secure', {
-      p_code: code, p_host_id: this.uid, p_secret: this.secret, p_settings: settings,
-    });
-    if (res.error?.code === 'PGRST202') {
-      const { error } = await sb.from('sessions').update({ settings }).eq('code', code);
-      if (error) throw new Error(error.message);
-    } else if (res.error) {
-      throw new Error(res.error.message);
-    }
+    if (!this.isHost()) return;
+    this.session.update((s) => (s ? { ...s, settings: { ...settings } } : s));
+    await this.sendP2p('s', 'session_patch', { settings: { ...settings } });
+    await this.broadcastFullStateSync();
+    await this.persistEncryptedSnapshot();
   }
 
   async renamePlayer(playerId: string, newName: string) {
     const code = this.code();
-    const name = newName.trim().slice(0, 20);
+    const name = sanitizeName(newName);
     if (!code || !name) throw new Error('Le pseudo ne peut pas être vide.');
-    const sb = this.client();
-    const res = await sb.rpc('rename_player_secure', {
-      p_code: code, p_actor_id: this.uid, p_secret: this.secret, p_target_id: playerId, p_name: name,
-    });
-    if (res.error?.code === 'PGRST202') {
-      const { error } = await sb.from('players').update({ name }).eq('session_code', code).eq('id', playerId);
-      if (error) throw new Error(error.message);
-    } else if (res.error) {
-      throw new Error(res.error.message);
+    if (playerId !== this.uid && !this.isHost()) return;
+
+    this.players.update((m) => (m[playerId] ? { ...m, [playerId]: { ...m[playerId], name } } : m));
+    if (playerId === this.uid) {
+      try { localStorage.setItem('tm_name', name); } catch { /* ignore */ }
     }
-    if (playerId === this.uid) localStorage.setItem('tm_name', name);
+    await this.sendP2p('s', 'player_patch', { targetId: playerId, patch: { name } });
+    await this.persistEncryptedSnapshot();
   }
 
   async kickPlayer(playerId: string) {
-    const code = this.code();
-    if (!code || playerId === this.uid) return;
-    const sb = this.client();
-    const res = await sb.rpc('kick_player_secure', {
-      p_code: code, p_host_id: this.uid, p_secret: this.secret, p_target_id: playerId,
+    if (!this.isHost() || playerId === this.uid) return;
+    this.players.update((m) => {
+      const { [playerId]: _r, ...rest } = m;
+      return rest;
     });
-    if (res.error?.code === 'PGRST202') {
-      const { error } = await sb.from('players').delete().eq('session_code', code).eq('id', playerId);
-      if (error) throw new Error(error.message);
-    } else if (res.error) {
-      throw new Error(res.error.message);
-    }
+    this.peerLastSeen.delete(playerId);
+    this.mesh?.removePeer(playerId);
+    this.updateOnlineSet();
+    await this.sendP2p('s', 'player_kick', {
+      targetId: playerId,
+      reason: "Tu as été exclu de la session par l'hôte.",
+    });
+    await this.persistEncryptedSnapshot();
   }
 
   async start() {
     const s = this.session();
-    if (!s) return;
+    if (!s || !this.isHost()) return;
     const ids = this.sortedPlayers().map((p) => p.id);
     let hunters: string[];
     if (s.settings.roleMode === 'random') {
-      const shuffled = [...ids].sort(() => Math.random() - 0.5);
+      const shuffled = secureShuffle(ids);
       hunters = shuffled.slice(0, Math.min(Math.max(1, s.settings.hunters), ids.length - 1));
     } else {
       hunters = this.sortedPlayers().filter((p) => p.role === 'hunter').map((p) => p.id);
       if (!hunters.length) throw new Error('Choisis au moins un chasseur.');
       if (hunters.length === ids.length) throw new Error('Il faut au moins un chassé.');
     }
-    const sb = this.client();
-    const res = await sb.rpc('start_game', {
-      p_code: s.code, p_hunters: hunters, p_host_id: this.uid, p_secret: this.secret,
+
+    const startAt = this.serverNow();
+    const endAt = startAt + s.settings.total * 60000;
+    const startEvent: GameEvent = {
+      id: startAt,
+      session_code: s.code,
+      type: 'start',
+      t: startAt,
+      data: {},
+    };
+
+    await this.applyStartGame(startAt, endAt, hunters, startEvent);
+    await this.sendP2p('s', 'start_game', { startAt, endAt, hunters, event: startEvent });
+    await this.broadcastFullStateSync();
+  }
+
+  private async applyStartGame(startAt: number, endAt: number, hunters: string[], startEvent: GameEvent) {
+    const code = this.code();
+    if (!code) return;
+    this.failedCatchAttempts = 0;
+    this.catchLockedUntil = 0;
+
+    await this.refreshMyCatchCodeAndCommitment(code, startAt);
+
+    this.players.update((map) => {
+      const next: Record<string, Player> = {};
+      for (const [id, pl] of Object.entries(map)) {
+        const r: Role = hunters.includes(id) ? 'hunter' : 'hunted';
+        next[id] = {
+          ...pl,
+          role: r,
+          initial_role: r,
+          catch_code: '****',
+          catch_commitment: id === this.uid ? this.myCurrentCommitment : pl.catch_commitment,
+          caught_by: null,
+          caught_at: null,
+          circle: null,
+          pos: null,
+          seen: startAt,
+        };
+      }
+      return next;
     });
-    if (res.error?.code === 'PGRST202') {
-      const legacy = await sb.rpc('start_game', { p_code: s.code, p_hunters: hunters });
-      if (legacy.error) throw new Error(legacy.error.message);
-      return;
-    }
-    if (res.error) throw new Error(res.error.message);
+
+    this.events.set([startEvent]);
+    this.session.update((cur) =>
+      cur
+        ? { ...cur, status: 'playing', start_at: startAt, end_at: endAt, winner: null, ended_at: null }
+        : cur,
+    );
+    vibrate(300);
+
+    // Diffuse immédiatement notre engagement cryptographique (commitment PBKDF2) de code chasseur
+    await this.sendP2p('s', 'player_patch', {
+      targetId: this.uid,
+      patch: { catch_commitment: this.myCurrentCommitment },
+    });
+    await this.persistEncryptedSnapshot();
   }
 
   async declareCaught(catchCode: string) {
-    const sb = this.client();
-    const res = await sb.rpc('catch_player', {
-      p_code: this.code(), p_victim: this.uid, p_catch_code: catchCode, p_secret: this.secret,
-    });
-    if (res.error?.code === 'PGRST202') {
-      const legacy = await sb.rpc('catch_player', {
-        p_code: this.code(), p_victim: this.uid, p_catch_code: catchCode,
-      });
-      if (legacy.error) throw new Error(legacy.error.message);
-      this.lastCircle = null;
-      return;
+    const s = this.session();
+    const me = this.me();
+    const code = this.code();
+    if (!s || !me || !code || s.status !== 'playing') throw new Error("La partie n'est pas en cours.");
+    if (me.role !== 'hunted') throw new Error("Tu n'es pas chassé.");
+
+    const now = this.serverNow();
+    if (this.catchLockedUntil > now) {
+      const waitSec = Math.ceil((this.catchLockedUntil - now) / 1000);
+      throw new Error(`Trop de tentatives erronées — patiente ${waitSec} s.`);
     }
-    if (res.error) throw new Error(res.error.message);
+
+    const cleanCatchCode = catchCode.replace(/\D/g, '').slice(0, 4);
+    if (cleanCatchCode.length !== 4) throw new Error('Le code fait 4 chiffres.');
+
+    const hunters = this.sortedPlayers().filter((p) => p.role === 'hunter' && p.id !== this.uid);
+    let matchedHunter: Player | null = null;
+
+    for (const h of hunters) {
+      if (!h.catch_commitment) continue;
+      const candidateCommitment = await this.crypto.computeCatchCommitment(
+        code,
+        s.start_at ?? 0,
+        h.id,
+        cleanCatchCode,
+      );
+      if (candidateCommitment === h.catch_commitment) {
+        matchedHunter = h;
+        break;
+      }
+    }
+
+    if (!matchedHunter) {
+      this.failedCatchAttempts++;
+      if (this.failedCatchAttempts >= 5) {
+        this.failedCatchAttempts = 0;
+        this.catchLockedUntil = now + 60_000;
+        throw new Error('5 codes erronés : verrouillage de sécurité pendant 60 secondes.');
+      }
+      throw new Error('Code chasseur invalide.');
+    }
+
+    this.failedCatchAttempts = 0;
+    this.catchLockedUntil = 0;
+    const ev: GameEvent = {
+      id: now + Math.floor(secureRandomUnit() * 1000),
+      session_code: code,
+      type: 'caught',
+      t: now,
+      data: {
+        victim: this.uid,
+        victimName: me.name,
+        hunter: matchedHunter.id,
+        hunterName: matchedHunter.name,
+      },
+    };
+
+    this.applyPlayerCaught(this.uid, matchedHunter.id, now, ev);
+    this.clearMyCircleState();
+    await this.sendP2p('s', 'caught', {
+      victimId: this.uid,
+      hunterId: matchedHunter.id,
+      caughtAt: now,
+      event: ev,
+    });
+  }
+
+  private applyPlayerCaught(victimId: string, hunterIdOrZone: string, caughtAt: number, ev: GameEvent) {
+    this.players.update((m) =>
+      m[victimId]
+        ? {
+            ...m,
+            [victimId]: {
+              ...m[victimId],
+              role: 'hunter',
+              caught_by: hunterIdOrZone,
+              caught_at: caughtAt,
+              circle: null,
+            },
+          }
+        : m,
+    );
+    this.allyExactPos.update((m) => {
+      const { [victimId]: _r, ...rest } = m;
+      return rest;
+    });
+    this.notifyIfNewEvent(ev);
+    if (!this.events().some((x) => x.id === ev.id)) {
+      this.events.update((l) => [...l, ev]);
+    }
+    void this.persistEncryptedSnapshot();
+  }
+
+  private clearMyCircleState() {
     this.lastCircle = null;
+    this.players.update((m) => (m[this.uid] ? { ...m, [this.uid]: { ...m[this.uid], circle: null } } : m));
+    void this.sendP2p('s', 'circle', { circle: null });
   }
 
   async replay() {
-    const sb = this.client();
-    const res = await sb.rpc('reset_game', {
-      p_code: this.code(), p_host_id: this.uid, p_secret: this.secret,
+    if (!this.isHost()) return;
+    this.applyResetGame();
+    await this.sendP2p('s', 'reset_game', { at: this.serverNow() });
+    await this.broadcastFullStateSync();
+  }
+
+  private applyResetGame() {
+    const s = this.session();
+    if (!s) return;
+    const manual = s.settings.roleMode === 'manual';
+    this.clearLocalTracks();
+    this.players.update((map) => {
+      const next: Record<string, Player> = {};
+      for (const [id, pl] of Object.entries(map)) {
+        next[id] = {
+          ...pl,
+          role: manual ? (pl.initial_role ?? 'hunted') : 'hunted',
+          caught_by: null,
+          caught_at: null,
+          circle: null,
+          pos: null,
+          seen: null,
+        };
+      }
+      return next;
     });
-    if (res.error?.code === 'PGRST202') {
-      const legacy = await sb.rpc('reset_game', { p_code: this.code() });
-      if (legacy.error) throw new Error(legacy.error.message);
-      return;
-    }
-    if (res.error) throw new Error(res.error.message);
+    this.events.set([]);
+    this.session.update((cur) =>
+      cur ? { ...cur, status: 'lobby', start_at: null, end_at: null, winner: null, ended_at: null } : cur,
+    );
+    void this.persistEncryptedSnapshot();
   }
 
   // =================================================================
-  // Boucle de jeu & Zone autorisée & Trajectoire
+  // Boucle de jeu, Présence P2P, Zone autorisée & Trajectoire E2EE
   // =================================================================
   private tick() {
     const s = this.session();
     if (!s || !this.code()) return;
+
+    const nowMs = Date.now();
+    if (nowMs - this.lastHeartbeatAt > 3500) {
+      this.lastHeartbeatAt = nowMs;
+      this.updateOnlineSet();
+      void this.sendHeartbeat();
+    }
 
     if (s.status === 'lobby') return this.claimHostIfNeeded(s);
     if (s.status !== 'playing' || !this.me()) return;
@@ -590,7 +1293,6 @@ export class GameService {
     this.checkEnd(s);
   }
 
-  /** Vérifie si le joueur est en dehors de la zone autorisée et applique le compte à rebours d'élimination. */
   private checkZone(s: Session) {
     const z = s.settings.zone;
     const pos = this.myPos();
@@ -616,57 +1318,68 @@ export class GameService {
     }
     const graceMs = (s.settings.outGraceSec ?? 30) * 1000;
     if (this.now() - since >= graceMs && !this.eliminatingZone) {
-      this.eliminateOutOfZone();
+      void this.eliminateOutOfZone();
     }
   }
 
   private async eliminateOutOfZone() {
     const code = this.code();
     const m = this.me();
-    if (!code || !m || m.role !== 'hunted' || !this.sb) return;
+    if (!code || !m || m.role !== 'hunted') return;
     this.eliminatingZone = true;
     const t = this.serverNow();
     try {
-      const res = await this.sb.rpc('eliminate_out_of_zone_secure', {
-        p_code: code, p_id: this.uid, p_secret: this.secret,
-      });
-      if (res.error?.code === 'PGRST202') {
-        await this.sb.from('players').update({
-          role: 'hunter', caught_by: 'ZONE', caught_at: t, circle: null,
-        }).eq('session_code', code).eq('id', this.uid);
-        await this.sb.from('events').insert({
-          session_code: code, type: 'out_of_zone', t, data: { victim: this.uid, victimName: m.name },
-        });
-      }
+      const ev: GameEvent = {
+        id: t + Math.floor(secureRandomUnit() * 1000),
+        session_code: code,
+        type: 'out_of_zone',
+        t,
+        data: { victim: this.uid, victimName: m.name },
+      };
+      this.applyPlayerCaught(this.uid, 'ZONE', t, ev);
       this.outOfZoneSince.set(null);
-      this.lastCircle = null;
+      this.clearMyCircleState();
+      await this.sendP2p('s', 'out_of_zone', {
+        victimId: this.uid,
+        caughtAt: t,
+        event: ev,
+      });
     } finally {
       this.eliminatingZone = false;
     }
   }
 
-  /** Si l'hôte est hors ligne, le premier joueur connecté devient hôte. */
   private claimHostIfNeeded(s: Session) {
-    if (Date.now() - this.openedAt < 8000) return;
+    if (Date.now() - this.openedAt < 9000) return;
     const online = this.online();
     if (!online.has(this.uid) || online.has(s.host_id)) return;
     const first = this.sortedPlayers().find((p) => online.has(p.id));
-    if (first?.id === this.uid && this.sb) {
-      this.sb.rpc('claim_host_secure', { p_code: s.code, p_id: this.uid, p_secret: this.secret })
-        .then(({ error }) => {
-          if (error?.code === 'PGRST202') {
-            this.sb?.from('sessions').update({ host_id: this.uid }).eq('code', s.code).then();
-          }
-        });
+    if (first?.id === this.uid) {
+      this.session.update((cur) => (cur ? { ...cur, host_id: this.uid } : cur));
+      void this.sendP2p('s', 'session_patch', { host_id: this.uid, claimHost: true });
       this.openedAt = Date.now();
     }
   }
 
   private checkEnd(s: Session) {
     if (this.ending || s.end_at == null) return;
-    if (this.now() < s.end_at && this.alive().length > 0) return;
+    const timeUp = this.now() >= s.end_at;
+    const allCaught = this.alive().length === 0;
+    if (!timeUp && !allCaught) return;
     this.ending = true;
-    this.sb?.rpc('end_game', { p_code: s.code }).then(() => setTimeout(() => (this.ending = false), 3000));
+    const endedAt = this.serverNow();
+    const winner: 'hunted' | 'hunters' = allCaught ? 'hunters' : 'hunted';
+    this.applyEndGame(endedAt, winner);
+    void this.sendP2p('s', 'end_game', { endedAt, winner });
+    setTimeout(() => (this.ending = false), 3000);
+  }
+
+  private applyEndGame(endedAt: number, winner: 'hunted' | 'hunters') {
+    this.session.update((cur) =>
+      cur && cur.status === 'playing' ? { ...cur, status: 'ended', ended_at: endedAt, winner } : cur,
+    );
+    void this.flushMyTrack();
+    void this.persistEncryptedSnapshot();
   }
 
   private startPlaying() {
@@ -674,17 +1387,14 @@ export class GameService {
     this.playing = true;
     this.lastRadius = null;
     this.wasHead = null;
-    this.lastCircle = null;
     this.lastPosWrite = 0;
-    this.lastSeenWrite = 0;
+    this.lastCircleBroadcast = 0;
     this.ending = false;
     this.eliminatingZone = false;
     this.outOfZoneSince.set(null);
-    this.myTrack = this.loadLocalTrack();
     this.lastTrackSample = 0;
     this.trackFlushed = false;
     this.lastValidGps = null;
-    this.fetchMyCatchCode(this.me() ?? undefined);
     this.requestWakeLock();
     try {
       if ('Notification' in window && Notification.permission === 'default') {
@@ -706,7 +1416,12 @@ export class GameService {
     }
     this.watchId = navigator.geolocation.watchPosition(
       (p) => {
-        const candidate = { lat: p.coords.latitude, lng: p.coords.longitude, acc: Math.round(p.coords.accuracy) };
+        if (!isValidLatLng(p.coords.latitude, p.coords.longitude)) return;
+        const candidate = {
+          lat: p.coords.latitude,
+          lng: p.coords.longitude,
+          acc: Math.max(1, Math.round(p.coords.accuracy || 10)),
+        };
         const now = this.serverNow();
         // Filtre anti-spoofing / téléportation GPS (> 45 m/s ≈ 162 km/h)
         if (this.lastValidGps) {
@@ -741,20 +1456,17 @@ export class GameService {
     this.wakeLock = null;
   }
 
-  /** Coupe immédiatement le GPS, efface la position locale/serveur et bloque l'accès jusqu'à réactivation explicite. */
+  /** Coupe immédiatement le GPS, efface la position en mémoire vive et bloque l'accès jusqu'à réactivation explicite. */
   async revokeGpsAccess() {
     if (this.watchId != null) navigator.geolocation.clearWatch(this.watchId);
     this.watchId = null;
     this.myPos.set(null);
-    this.lastCircle = null;
-    this.myTrack = [];
+    this.clearMyCircleState();
+    void this.sendP2p('h', 'hunter_pos', { off: true });
+    void this.sendP2p('a', 'ally_pos', { off: true });
     this.clearLocalTracks();
     this.gpsRevoked.set(true);
     try { localStorage.setItem('tm_gps_revoked', '1'); } catch { /* ignore */ }
-    const code = this.code();
-    if (code && this.sb) {
-      await this.sb.from('players').update({ pos: null, circle: null }).eq('session_code', code).eq('id', this.uid);
-    }
     this.toast.show('🔒 Droits GPS retirés & position effacée');
   }
 
@@ -767,7 +1479,6 @@ export class GameService {
     this.toast.show('📍 Accès GPS réactivé pour cette partie');
   }
 
-  /** Enregistre localement un point GPS toutes les 6 s (ou dès 8 m de déplacement) pour le récap de fin. */
   private sampleMyTrack() {
     const pos = this.myPos(), m = this.me();
     if (!pos || !m || this.session()?.status !== 'playing') return;
@@ -776,73 +1487,79 @@ export class GameService {
     if (last && t - this.lastTrackSample < 6000 && distance(pos, last) < 8) return;
     this.lastTrackSample = t;
     this.myTrack.push({
-      lat: Number(pos.lat.toFixed(6)),
-      lng: Number(pos.lng.toFixed(6)),
+      lat: Number(pos.lat.toFixed(5)),
+      lng: Number(pos.lng.toFixed(5)),
       t,
       role: m.role,
     });
-    try {
-      localStorage.setItem(`tm_track_${this.code()}_${this.session()?.start_at}`, JSON.stringify(this.myTrack));
-    } catch { /* quota */ }
+    if (this.myTrack.length > 400) {
+      this.myTrack = this.myTrack.filter((_, i, arr) => i === 0 || i === arr.length - 1 || i % 2 === 0);
+    }
+    void this.persistEncryptedSnapshot();
   }
 
-  private loadLocalTrack(): Pos[] {
+  private async persistEncryptedSnapshot() {
+    const code = this.code();
+    const s = this.session();
+    if (!code || !s) return;
     try {
-      const raw = localStorage.getItem(`tm_track_${this.code()}_${this.session()?.start_at}`);
-      return raw ? (JSON.parse(raw) as Pos[]) : [];
+      const snap: EncryptedSnapshot = {
+        session: s,
+        players: this.players(),
+        events: this.events(),
+        myTrack: this.myTrack,
+        lastCircle: this.lastCircle,
+      };
+      const blob = await this.crypto.encryptLocalData(code, this.secret, snap);
+      sessionStorage.setItem(`tm_snap_${code}`, blob);
+    } catch { /* ignore */ }
+  }
+
+  private async restoreEncryptedSnapshot(code: string): Promise<boolean> {
+    try {
+      const blob = sessionStorage.getItem(`tm_snap_${code}`);
+      if (!blob) return false;
+      const dec = await this.crypto.decryptLocalData<EncryptedSnapshot>(code, this.secret, blob);
+      if (!dec?.session || dec.session.code !== code) return false;
+      this.session.set(dec.session);
+      this.players.set(dec.players ?? {});
+      this.events.set(dec.events ?? []);
+      this.myTrack = Array.isArray(dec.myTrack) ? dec.myTrack : [];
+      this.lastCircle = dec.lastCircle ?? null;
+      return true;
     } catch {
-      return [];
+      return false;
     }
   }
 
-  /**
-   * À la fin de la partie seulement, chaque joueur envoie sa trajectoire complète dans `events`
-   * pour que l'écran de fin puisse afficher le parcours exact de tout le monde.
-   */
+  private removeEncryptedSnapshot(code: string) {
+    try { sessionStorage.removeItem(`tm_snap_${code}`); } catch { /* ignore */ }
+  }
+
   private async flushMyTrack() {
-    if (this.trackFlushed || !this.sb) return;
+    if (this.trackFlushed) return;
     const code = this.code(), m = this.me();
     if (!code || !m) return;
-    if (!this.myTrack.length) this.myTrack = this.loadLocalTrack();
     if (!this.myTrack.length && this.myPos()) {
       const p = this.myPos()!;
-      this.myTrack = [{ lat: p.lat, lng: p.lng, t: this.serverNow(), role: m.role }];
+      this.myTrack = [{ lat: Number(p.lat.toFixed(5)), lng: Number(p.lng.toFixed(5)), t: this.serverNow(), role: m.role }];
     }
     if (!this.myTrack.length) return;
     this.trackFlushed = true;
-    if (this.events().some((e) => (e.type === 'track' || e.type === 'pos') && e.data.playerId === this.uid)) return;
-    const res = await this.sb.rpc('submit_track_secure', {
-      p_code: code, p_id: this.uid, p_secret: this.secret, p_points: this.myTrack,
+
+    const now = this.serverNow();
+    this.recordTrackEvent(this.uid, m.name, this.myTrack, now);
+    await this.sendP2p('s', 'track', {
+      playerName: m.name,
+      points: this.myTrack,
     });
-    if (res.error?.code === 'PGRST202') {
-      await this.sb.from('events').insert({
-        session_code: code,
-        type: 'track',
-        t: this.serverNow(),
-        data: { playerId: this.uid, playerName: m.name, points: this.myTrack },
-      });
-    }
-    await this.refresh();
-    try { localStorage.removeItem(`tm_track_${code}_${this.session()?.start_at}`); } catch { /* ignore */ }
   }
 
-  private updateMe(values: { pos?: Pos | null; circle?: Circle | null; seen?: number | null }) {
-    const code = this.code();
-    if (!code || !this.sb) return;
-    this.sb.rpc('update_my_state', {
-      p_code: code,
-      p_id: this.uid,
-      p_secret: this.secret,
-      p_pos: values.pos ?? null,
-      p_circle: values.circle ?? null,
-      p_seen: values.seen ?? null,
-    }).then(({ error }) => {
-      if (error?.code === 'PGRST202') {
-        this.sb?.from('players').update(values).eq('session_code', code).eq('id', this.uid).then();
-      } else if (error) {
-        console.error(error);
-      }
-    });
+  private setMyCircleInRam(circle: Circle | null) {
+    const now = this.serverNow();
+    this.players.update((m) =>
+      m[this.uid] ? { ...m, [this.uid]: { ...m[this.uid], circle, seen: now } } : m,
+    );
   }
 
   private publishPosition() {
@@ -853,22 +1570,22 @@ export class GameService {
     if (m.role === 'hunter') {
       if (t - this.lastPosWrite > 4000) {
         this.lastPosWrite = t;
-        this.updateMe({ pos: { lat: pos.lat, lng: pos.lng, t }, seen: t });
+        const p: Pos = { lat: Number(pos.lat.toFixed(5)), lng: Number(pos.lng.toFixed(5)), t };
+        this.players.update((map) =>
+          map[this.uid] ? { ...map, [this.uid]: { ...map[this.uid], pos: p, seen: t } } : map,
+        );
+        void this.sendP2p('h', 'hunter_pos', p);
       }
     } else {
       this.maybeUpdateCircle(pos);
       if (this.allyShareMode() === 'exact') this.broadcastExactToAllies(pos);
-      if (t - this.lastSeenWrite > 10000) {
-        this.lastSeenWrite = t;
-        this.updateMe({ seen: t });
+      if (this.lastCircle && t - this.lastCircleBroadcast > 5000) {
+        this.lastCircleBroadcast = t;
+        void this.sendP2p('s', 'circle', { circle: this.lastCircle });
       }
     }
   }
 
-  /**
-   * Cercle d'un chassé : son centre est décalé aléatoirement, la vraie position est toujours dedans.
-   * Il est régénéré quand le chassé approche du bord, quand le rayon rétrécit ou selon l'intervalle choisi.
-   */
   private maybeUpdateCircle(pos: MyPos, forceFlagUpdate = false) {
     const m = this.me();
     if (!m || m.role !== 'hunted') return;
@@ -880,15 +1597,22 @@ export class GameService {
     const d = c ? distance(pos, c) : Infinity;
     const expired = !!(c && refreshSec && refreshSec > 0 && now - c.t >= refreshSec * 1000);
     if (!c || c.r !== radius || d > radius * 0.85 || expired) {
-      const center = destPoint(pos, radius * (0.1 + Math.random() * 0.6), Math.random() * 360);
+      const offsetRatio = 0.12 + Math.sqrt(secureRandomUnit()) * 0.56;
+      const bearing = secureRandomUnit() * 360;
+      const center = destPoint(pos, radius * offsetRatio, bearing);
       const circle: Circle = { lat: center.lat, lng: center.lng, r: radius, t: now, allyShare };
       this.lastCircle = circle;
-      this.updateMe({ circle, seen: now });
-      this.lastSeenWrite = now;
+      this.lastCircleBroadcast = now;
+      this.setMyCircleInRam(circle);
+      void this.sendP2p('s', 'circle', { circle });
+      void this.persistEncryptedSnapshot();
     } else if (forceFlagUpdate && c.allyShare !== allyShare) {
       const circle: Circle = { ...c, allyShare };
       this.lastCircle = circle;
-      this.updateMe({ circle });
+      this.lastCircleBroadcast = now;
+      this.setMyCircleInRam(circle);
+      void this.sendP2p('s', 'circle', { circle });
+      void this.persistEncryptedSnapshot();
     }
   }
 

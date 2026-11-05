@@ -16,7 +16,7 @@ import { RouterLink } from '@angular/router';
           <span class="legal-badge">Un service Paddock Actu</span>
           <h1>Mentions Légales & Conditions Générales d'Utilisation</h1>
           <p class="hint">
-            Conformité LCEN n° 2004-575, RGPD (UE 2016/679) & Code de la Propriété Intellectuelle — Dernière mise à jour : 01/11/2026
+            Conformité LCEN n° 2004-575, RGPD (UE 2016/679), ANSSI / ENISA & Code de la Propriété Intellectuelle — Dernière mise à jour : 05/11/2026
           </p>
         </div>
 
@@ -45,23 +45,21 @@ import { RouterLink } from '@angular/router';
         </div>
 
         <div class="card legal-card">
-          <h3>2. Hébergement du site et des données</h3>
-          <p>Conformément à l'article 6-III-1-b de la LCEN, l'hébergement du Site et de ses données est assuré par :</p>
+          <h3>2. Hébergement statique & Architecture Sans Base de Données (P2P)</h3>
+          <p>Conformément à l'article 6-III-1-b de la LCEN :</p>
           <ul>
             <li>
-              <b>Hébergement Frontend & Fonctions Edge (Serverless) :</b><br>
+              <b>Hébergement statique Frontend & Distribution CDN sécurisée :</b><br>
               Netlify, Inc.<br>
               512 2nd Street, Suite 200, San Francisco, CA 94107, États-Unis<br>
               Site web : <a href="https://www.netlify.com/" target="_blank" rel="noopener">www.netlify.com</a>
             </li>
             <li>
-              <b>Hébergement Base de données, Authentification & Temps réel sécurisé :</b><br>
-              Supabase, Inc.<br>
-              970 Toa Payoh North #07-04, Singapour 318992 (et Delaware, États-Unis)<br>
-              Site web : <a href="https://www.supabase.com/" target="_blank" rel="noopener">www.supabase.com</a>
+              <b>Absence de serveur de base de données (Architecture 100 % Peer-to-Peer E2EE) :</b><br>
+              Tracker Man fonctionne sans aucune base de données centrale. Les échanges temps réel s'effectuent directement entre les terminaux des joueurs via <code>WebRTC DataChannels</code> et routage éphémère chiffré de bout en bout (<code>AES-256-GCM</code> + <code>ECDSA P-256</code>).
             </li>
             <li>
-              <b>Fonds cartographiques :</b><br>
+              <b>Fonds cartographiques (avec politique <code>no-referrer</code>) :</b><br>
               Contributeurs OpenStreetMap (<a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">www.openstreetmap.org</a>) via la bibliothèque open-source Leaflet.
             </li>
           </ul>
@@ -70,7 +68,7 @@ import { RouterLink } from '@angular/router';
         <div class="card legal-card">
           <h3>3. Propriété intellectuelle</h3>
           <p>
-            <b>Éléments originaux du Service :</b> La structure générale, le code source Angular, les algorithmes de calcul de zones radar décalées, l'ergonomie visuelle, le graphisme ainsi que les marques et logos <b>Tracker Man</b> et <b>Paddock Actu</b> sont protégés par le Code de la Propriété Intellectuelle (articles L.111-1 et suivants).
+            <b>Éléments originaux du Service :</b> La structure générale, le code source Angular, les protocoles cryptographiques P2P E2EE, les algorithmes de calcul de zones radar décalées par CSPRNG, l'ergonomie visuelle, le graphisme ainsi que les marques et logos <b>Tracker Man</b> et <b>Paddock Actu</b> sont protégés par le Code de la Propriété Intellectuelle (articles L.111-1 et suivants).
           </p>
           <p>
             Toute reproduction, représentation, diffusion ou exploitation commerciale partielle ou totale sans accord préalable écrit de l'éditeur est strictement interdite (art. L.335-2 du CPI).
@@ -78,14 +76,14 @@ import { RouterLink } from '@angular/router';
         </div>
 
         <div class="card legal-card">
-          <h3>4. Nature du service & Fonctionnement</h3>
+          <h3>4. Nature du service & Architecture de Sécurité P2P E2EE</h3>
           <p>
-            Tracker Man permet à un groupe d'amis de créer ou rejoindre une session temporaire via un code à 6 caractères ou un QR code afin d'organiser une partie de cache-cache géolocalisée :
+            Tracker Man permet à un groupe d'amis de créer ou rejoindre une session éphémère via un code à 6 caractères ou un QR code afin d'organiser une partie de cache-cache géolocalisée :
           </p>
           <ul>
-            <li>Pendant la partie, la position exacte des joueurs « Chassés » n'est pas transmise aux « Chasseurs » : seul un cercle radar au centre décalé aléatoirement est partagé.</li>
-            <li>Une zone géographique autorisée et des règles de rétrécissement peuvent être définies par l'hôte de la session.</li>
-            <li>En fin de partie uniquement, un récapitulatif des trajectoires et statistiques de la manche est généré pour les participants de la session.</li>
+            <li><b>Zéro base de données & Zéro sauvegarde serveur :</b> Aucune coordonnée GPS ni aucune trajectoire n'est enregistrée sur un serveur. Toutes les données géographiques transitent exclusivement en mémoire vive (RAM) chiffrée de bout en bout (<code>AES-256-GCM</code>).</li>
+            <li><b>Séparation cryptographique des rôles :</b> Pendant la partie, la position exacte des joueurs « Chassés » n'est jamais transmise aux « Chasseurs » (seul un cercle radar au centre décalé par générateur cryptographique CSPRNG est partagé), et les positions des chasseurs sont chiffrées avec une clé dédiée inaccessible aux chassés.</li>
+            <li><b>Récapitulatif éphémère en mémoire vive :</b> En fin de partie uniquement, le bilan des trajectoires est échangé directement en P2P chiffré entre les participants connectés à la session et disparaît dès la fermeture de la partie.</li>
           </ul>
         </div>
 
@@ -93,9 +91,9 @@ import { RouterLink } from '@angular/router';
           <h3>5. Conditions Générales d'Utilisation (CGU) & Règles de comportement</h3>
           <p>L'accès et l'utilisation de Tracker Man impliquent l'acceptation pleine et entière des présentes conditions :</p>
           <ul>
-            <li><b>Accès sans création de compte :</b> Le service est gratuit et fonctionne sans inscription par e-mail ni mot de passe. Un identifiant technique aléatoire et un jeton cryptographique local protègent votre session contre l'usurpation.</li>
+            <li><b>Accès sans création de compte :</b> Le service est gratuit et fonctionne sans inscription par e-mail ni mot de passe. Une paire de clés asymétriques <code>ECDSA P-256</code> locale protège votre session contre l'usurpation.</li>
             <li><b>Usage loyal & Interdictions :</b> Il est strictement interdit d'utiliser Tracker Man à des fins de surveillance, de filature ou de géolocalisation d'une personne sans son consentement libre, éclairé et explicite.</li>
-            <li><b>Sécurité informatique :</b> L'utilisateur s'interdit tout comportement malveillant, toute falsification de coordonnées GPS (spoofing), toute tentative d'intrusion ou de contournement des règles de sécurité (RLS / RPC) et tout pseudonyme injurieux, haineux ou diffamatoire.</li>
+            <li><b>Sécurité informatique :</b> L'utilisateur s'interdit tout comportement malveillant, toute falsification de coordonnées GPS (spoofing), toute tentative d'intrusion et tout pseudonyme injurieux, haineux ou diffamatoire.</li>
             <li><b>Sécurité sur le terrain :</b> Les joueurs s'engagent à pratiquer le jeu uniquement dans des lieux publics sûrs et autorisés, sans jamais se mettre en danger ni troubler l'ordre public. L'éditeur décline toute responsabilité en cas d'accident, de chute, d'infraction ou de dommage matériel ou corporel survenant lors d'une partie.</li>
           </ul>
         </div>
@@ -103,14 +101,14 @@ import { RouterLink } from '@angular/router';
         <div class="card legal-card">
           <h3>6. Données personnelles (RGPD), Géolocalisation & Cookies</h3>
           <p>
-            Tracker Man et Paddock Actu appliquent une politique stricte de minimisation des données conformément au Règlement Général sur la Protection des Données (RGPD — UE 2016/679).
+            Tracker Man et Paddock Actu appliquent une politique stricte de minimisation des données et de chiffrement de bout en bout conformément au Règlement Général sur la Protection des Données (RGPD — UE 2016/679, articles 25 et 32).
           </p>
           <p>
-            Les coordonnées GPS ne sont traitées que pendant la durée active de votre partie et uniquement avec votre autorisation système explicite. Aucune donnée n'est vendue ni utilisée à des fins publicitaires.
-            Pour consulter le détail complet des traitements, la durée de conservation éphémère des sessions et vos droits, consultez notre <a routerLink="/confidentialite">Politique de Confidentialité (Conforme RGPD)</a>.
+            Les coordonnées GPS ne sont traitées qu'en mémoire vive pendant la durée active de votre partie, uniquement avec votre autorisation système explicite, et ne sont jamais stockées sur serveur. Aucune donnée n'est vendue ni utilisée à des fins publicitaires.
+            Pour consulter le détail complet de l'architecture cryptographique et vos droits, consultez notre <a routerLink="/confidentialite">Politique de Confidentialité (Conforme RGPD & ANSSI)</a>.
           </p>
           <p>
-            <b>Absence de cookies publicitaires :</b> Le Site ne dépose aucun cookie publicitaire, aucun cookie de profilage commercial ni traceur tiers. Seul le stockage local technique (<code>localStorage</code>) strictement nécessaire au maintien de votre session de jeu est utilisé.
+            <b>Absence de cookies publicitaires :</b> Le Site ne dépose aucun cookie publicitaire, aucun cookie de profilage commercial ni traceur tiers.
           </p>
         </div>
 
@@ -118,7 +116,7 @@ import { RouterLink } from '@angular/router';
           <h3>7. Signalement d'abus (LCEN) & Contact</h3>
           <p>
             Conformément à l'article 6-I-5 de la LCEN, tout abus ou contenu illicite peut être signalé à tout moment à l'adresse :
-            <a href="mailto:paddock.actu.f1@gmail.com">paddock.actu.f1@gmail.com</a>. L'éditeur procèdera à son examen et à la suppression de la session concernée sous 48 heures ouvrées.
+            <a href="mailto:paddock.actu.f1@gmail.com">paddock.actu.f1@gmail.com</a>.
           </p>
         </div>
 

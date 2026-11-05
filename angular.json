@@ -60,11 +60,20 @@
               "src/styles.scss"
             ],
             "allowedCommonJsDependencies": [
-              "leaflet"
+              "leaflet",
+              "qrcode"
             ]
           },
           "configurations": {
             "production": {
+              "optimization": {
+                "scripts": true,
+                "styles": {
+                  "minify": true,
+                  "inlineCritical": false
+                },
+                "fonts": true
+              },
               "budgets": [
                 {
                   "type": "initial",
