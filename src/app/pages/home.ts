@@ -19,6 +19,15 @@ import { PwaService } from '../core/pwa.service';
           </p>
         </div>
 
+        <div class="card maintenance-card" role="alert">
+          <strong>🛠️ Maintenance en cours</strong>
+          <p>Une mise à jour est en cours : réouverture prévue le 12 novembre.</p>
+        </div>
+
+        @if (maintenanceError()) {
+          <p class="error center" role="alert">⚠️ {{ maintenanceError() }}</p>
+        }
+
         @if (savedCode()) {
           <button class="btn secondary big" (click)="resume()">↩️ Reprendre la partie {{ savedCode() }}</button>
         }
@@ -74,6 +83,9 @@ export class HomePage {
   readonly fromQr = signal(false);
   readonly savedCode = signal(localStorage.getItem('tm_code'));
   readonly busy = signal(false);
+  readonly maintenanceError = signal<string | null>(null);
+
+  private readonly maintenanceMsg = 'Une mise à jour est en cours : réouverture prévue le 12 novembre';
 
   constructor() {
     const route = inject(ActivatedRoute);
@@ -81,14 +93,17 @@ export class HomePage {
     if (paramCode.length === 6) {
       this.code.set(paramCode);
       this.fromQr.set(true);
-      if (this.name().trim() && this.game.configured) {
-        setTimeout(() => this.join(), 150);
-      }
+      this.showMaintenance();
     }
   }
 
+  private showMaintenance() {
+    this.maintenanceError.set(this.maintenanceMsg);
+    this.toast.show('⚠️ ' + this.maintenanceMsg, 4500);
+  }
+
   onNameEnter() {
-    if (this.code().length === 6) this.join();
+    this.showMaintenance();
   }
 
   onCode(e: Event) {
@@ -97,35 +112,15 @@ export class HomePage {
     this.code.set(input.value);
   }
 
-  private checkName(): string | null {
-    const n = this.name().trim();
-    if (!n) { this.toast.show("Entre ton pseudo d'abord 🙂"); return null; }
-    if (!this.game.configured) { this.toast.show("Supabase n'est pas configuré (voir README)."); return null; }
-    localStorage.setItem('tm_name', n);
-    return n;
-  }
-
   goCreate() {
-    if (this.checkName()) this.router.navigate(['/create']);
+    this.showMaintenance();
   }
 
   resume() {
-    this.router.navigate(['/session', this.savedCode()]);
+    this.showMaintenance();
   }
 
   async join() {
-    const name = this.checkName();
-    if (!name) return;
-    const code = this.code().trim();
-    if (code.length !== 6) return this.toast.show('Le code fait 6 caractères.');
-    this.busy.set(true);
-    try {
-      await this.game.join(code, name);
-      this.router.navigate(['/session', code]);
-    } catch (e) {
-      this.toast.show((e as Error).message);
-    } finally {
-      this.busy.set(false);
-    }
+    this.showMaintenance();
   }
 }
