@@ -78,10 +78,21 @@ export class HomePage {
 
   constructor() {
     const route = inject(ActivatedRoute);
-    const paramCode = (route.snapshot.queryParamMap.get('code') ?? new URLSearchParams(location.search).get('code') ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const hashParams = new URLSearchParams(location.hash.replace(/^[#/?]+/, '?'));
+    const paramCode = (
+      route.snapshot.queryParamMap.get('code') ??
+      hashParams.get('code') ??
+      new URLSearchParams(location.search).get('code') ??
+      ''
+    ).toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+    const keyToken = route.snapshot.queryParamMap.get('k') ?? hashParams.get('k') ?? new URLSearchParams(location.search).get('k');
     if (paramCode.length === 6) {
       this.code.set(paramCode);
       this.fromQr.set(true);
+      if (keyToken) {
+        try { sessionStorage.setItem(`tm_sk_${paramCode}`, keyToken); } catch { /* ignore */ }
+      }
       if (this.name().trim() && this.game.configured) {
         setTimeout(() => this.join(), 150);
       }

@@ -11,6 +11,7 @@ export type PacketType =
   | 'player_patch'
   | 'player_kick'
   | 'start_game'
+  | 'role_keys'
   | 'caught'
   | 'out_of_zone'
   | 'end_game'
@@ -19,7 +20,8 @@ export type PacketType =
   | 'hunter_pos'
   | 'ally_pos'
   | 'track'
-  | 'rtc_signal';
+  | 'rtc_signal'
+  | 'catch_probe';
 
 export interface E2eeEnvelope {
   v: 2;
@@ -43,15 +45,27 @@ interface SessionKeySuite {
   localKey: CryptoKey;
 }
 
-interface DeviceSigningIdentity {
+export interface DeviceIdentity {
+  // Signature numérique asymétrique ECDSA P-256 (NIST FIPS 186-5)
   privateKey: CryptoKey;
   publicKeySpkiB64: string;
+  // Accord de clés asymétrique ECDH P-256 (NIST SP 800-56A Rev 3)
+  ecdhPrivateKey: CryptoKey;
+  ecdhPublicKeySpkiB64: string;
 }
 
-const PBKDF2_ITERATIONS = 210_000;
+export interface EncryptedRoleTicket {
+  targetUid: string;
+  role: 'hunter' | 'hunted';
+  iv: string;
+  ct: string;
+}
+
+const PBKDF2_ITERATIONS = 250_000;
 const CATCH_PBKDF2_ITERATIONS = 60_000;
-const MAX_CLOCK_SKEW_MS = 300_000; // Tolérance 5 min pour horloges téléphones non synchronisées
-const MAX_REPLAY_CACHE = 4000;
+const MAX_CLOCK_SKEW_MS = 300_000; // Tolérance 5 min pour horloges historiques
+const REALTIME_MAX_CLOCK_SKEW_MS = 25_000; // Tolérance stricte 25s pour coordonnées en direct (anti-rejeu)
+const MAX_REPLAY_CACHE = 5000;
 
 function toBase64(bytes: Uint8Array): string {
   let binary = '';
@@ -74,6 +88,62 @@ function randomHex(byteLen: number): string {
   const b = new Uint8Array(byteLen);
   crypto.getRandomValues(b);
   return toHex(b);
+}
+
+function openKeyVault(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') {
+      return reject(new Error('IndexedDB non disponible'));
+    }
+    const req = indexedDB.open('tm_secure_vault', 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains('keys')) {
+        db.createObjectStore('keys');
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function idbGet<T>(key: string): Promise<T | null> {
+  try {
+    const db = await openKeyVault();
+    return new Promise((resolve) => {
+      const tx = db.transaction('keys', 'readonly');
+      const store = tx.objectStore('keys');
+      const req = store.get(key);
+      req.onsuccess = () => resolve((req.result as T) ?? null);
+      req.onerror = () => resolve(null);
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function idbSet(key: string, val: unknown): Promise<void> {
+  try {
+    const db = await openKeyVault();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('keys', 'readwrite');
+      const store = tx.objectStore('keys');
+      const req = store.put(val, key);
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+    });
+  } catch { /* ignore */ }
+}
+
+export function isValidUid(uid: unknown): boolean {
+  if (typeof uid !== 'string') return false;
+  if (uid === '__proto__' || uid === 'constructor' || uid === 'prototype') return false;
+  return /^[a-zA-Z0-9_-]{4,64}$/.test(uid);
+}
+
+export function sanitizeCoord(n: number): number {
+  if (typeof n !== 'number' || !Number.isFinite(n)) return 0;
+  return Number(n.toFixed(6));
 }
 
 export function isValidLatLng(lat: unknown, lng: unknown): boolean {
@@ -105,74 +175,146 @@ export function sanitizeName(raw: unknown): string {
 /**
  * Service cryptographique E2EE Zero-Knowledge & Sans Serveur (P2P).
  * Conforme aux référentiels ANSSI, ENISA, NIST FIPS 186-5 (ECDSA P-256),
- * NIST SP 800-38D (AES-256-GCM), NIST SP 800-132 (PBKDF2-HMAC-SHA-256) et RFC 5869 (HKDF-SHA-256).
+ * NIST SP 800-56A (ECDH P-256), NIST SP 800-38D (AES-256-GCM AEAD),
+ * NIST SP 800-132 (PBKDF2-HMAC-SHA-256) et RFC 5869 (HKDF-SHA-256).
  *
  * - Authentification asymétrique : chaque appareil signe tous ses paquets avec ECDSA P-256.
- * - Confidentialité AEAD : chaque paquet est chiffré en AES-256-GCM avec séparation des rôles.
+ * - Accord de clés Zero-Knowledge : isolation stricte des rôles via ECDH P-256 (les chassés ne possèdent pas la clé chasseur et vice-versa).
+ * - Confidentialité AEAD : chaque paquet est chiffré en AES-256-GCM avec séparation cryptographique.
  * - Routage aveugle : le canal de communication est dérivé par hachage SHA-256 irréversible.
+ * - Anti-rejeu militaire : cache de nonces CSPRNG et fenêtres d'invalidation temporelle stricte.
  */
 @Injectable({ providedIn: 'root' })
 export class CryptoService {
   private suitePromise: Promise<SessionKeySuite> | null = null;
   private currentCode: string | null = null;
   private seenNonces = new Set<string>();
-  private identityPromise: Promise<DeviceSigningIdentity> | null = null;
+  private identityPromise: Promise<DeviceIdentity> | null = null;
   private importedPubKeys = new Map<string, CryptoKey>();
+  private importedEcdhKeys = new Map<string, CryptoKey>();
+
+  private sessionSecret: string | null = null;
+
+  // Clés dynamiques Zero-Knowledge distribuées par accord de clés ECDH
+  private dynamicHunterKey: CryptoKey | null = null;
+  private dynamicAllyKey: CryptoKey | null = null;
+
+  /** Configure le secret de session à haute entropie (128 bits minimum, transmis dans le fragment d'URL). */
+  setSessionSecret(sec: string | null) {
+    this.sessionSecret = sec ? sec.trim() : null;
+    this.suitePromise = null;
+    this.currentCode = null;
+    this.seenNonces.clear();
+  }
+
+  /** Révoque immédiatement une clé de groupe dynamique (Forward Secrecy / Rekeying lors d'une capture). */
+  revokeDynamicRoleKey(scope: 'h' | 'a') {
+    if (scope === 'a') this.dynamicAllyKey = null;
+    if (scope === 'h') this.dynamicHunterKey = null;
+  }
 
   /** Nettoie toutes les clés de session en mémoire vive et le cache anti-rejeu. */
   clearSessionKeys() {
     this.suitePromise = null;
     this.currentCode = null;
     this.seenNonces.clear();
+    this.dynamicHunterKey = null;
+    this.dynamicAllyKey = null;
+    this.importedPubKeys.clear();
+    this.importedEcdhKeys.clear();
+    this.sessionSecret = null;
   }
 
-  /** Charge ou génère la paire de clés asymétriques ECDSA P-256 (NIST P-256) de l'appareil. */
-  async getDeviceIdentity(): Promise<DeviceSigningIdentity> {
+  generateSecureToken(byteLen = 32): string {
+    return randomHex(byteLen);
+  }
+
+  /** Charge ou génère l'identité cryptographique asymétrique de l'appareil (ECDSA P-256 + ECDH P-256). */
+  async getDeviceIdentity(): Promise<DeviceIdentity> {
     if (this.identityPromise) return this.identityPromise;
     this.identityPromise = this.initDeviceIdentity();
     return this.identityPromise;
   }
 
-  private async initDeviceIdentity(): Promise<DeviceSigningIdentity> {
+  private async initDeviceIdentity(): Promise<DeviceIdentity> {
+    let privateKey: CryptoKey | null = null;
+    let publicKeySpkiB64 = '';
+    let ecdhPrivateKey: CryptoKey | null = null;
+    let ecdhPublicKeySpkiB64 = '';
+
+    // 1. Clé de signature numérique ECDSA P-256 stockée de façon NON-EXTRACTIBLE dans IndexedDB
     try {
-      const savedPriv = localStorage.getItem('tm_ecdsa_priv');
-      const savedPub = localStorage.getItem('tm_ecdsa_pub');
-      if (savedPriv && savedPub) {
-        const jwk = JSON.parse(savedPriv) as JsonWebKey;
-        const privateKey = await crypto.subtle.importKey(
-          'jwk',
-          jwk,
-          { name: 'ECDSA', namedCurve: 'P-256' },
-          false,
-          ['sign'],
-        );
-        return { privateKey, publicKeySpkiB64: savedPub };
+      const [idbPriv, idbPub] = await Promise.all([
+        idbGet<CryptoKey>('tm_ecdsa_priv_v3'),
+        idbGet<string>('tm_ecdsa_pub_v3'),
+      ]);
+      if (idbPriv && idbPub) {
+        privateKey = idbPriv;
+        publicKeySpkiB64 = idbPub;
       }
-    } catch { /* régénère en cas de corruption */ }
+    } catch { /* régénère */ }
 
-    const kp = await crypto.subtle.generateKey(
-      { name: 'ECDSA', namedCurve: 'P-256' },
-      true,
-      ['sign', 'verify'],
-    );
-    const [jwkPriv, spkiPub] = await Promise.all([
-      crypto.subtle.exportKey('jwk', kp.privateKey),
-      crypto.subtle.exportKey('spki', kp.publicKey),
-    ]);
-    const publicKeySpkiB64 = toBase64(new Uint8Array(spkiPub));
+    if (!privateKey || !publicKeySpkiB64) {
+      // Clé générée avec extractable: false pour empêcher toute fuite ou exfiltration XSS
+      const kp = await crypto.subtle.generateKey(
+        { name: 'ECDSA', namedCurve: 'P-256' },
+        false, // NON-EXTRACTIBLE
+        ['sign', 'verify'],
+      );
+      const spkiPub = await crypto.subtle.exportKey('spki', kp.publicKey);
+      publicKeySpkiB64 = toBase64(new Uint8Array(spkiPub));
+      privateKey = kp.privateKey;
+
+      await Promise.all([
+        idbSet('tm_ecdsa_priv_v3', kp.privateKey),
+        idbSet('tm_ecdsa_pub_v3', publicKeySpkiB64),
+      ]);
+      // Purge de sécurité : suppression des anciennes clés en clair du localStorage
+      try {
+        localStorage.removeItem('tm_ecdsa_priv');
+        localStorage.removeItem('tm_ecdsa_pub');
+      } catch { /* ignore */ }
+    }
+
+    // 2. Clé d'accord de clés ECDH P-256 stockée de façon NON-EXTRACTIBLE dans IndexedDB
     try {
-      localStorage.setItem('tm_ecdsa_priv', JSON.stringify(jwkPriv));
-      localStorage.setItem('tm_ecdsa_pub', publicKeySpkiB64);
-    } catch { /* navigation privée */ }
+      const [idbEcdhPriv, idbEcdhPub] = await Promise.all([
+        idbGet<CryptoKey>('tm_ecdh_priv_v3'),
+        idbGet<string>('tm_ecdh_pub_v3'),
+      ]);
+      if (idbEcdhPriv && idbEcdhPub) {
+        ecdhPrivateKey = idbEcdhPriv;
+        ecdhPublicKeySpkiB64 = idbEcdhPub;
+      }
+    } catch { /* régénère */ }
 
-    const nonExtractablePriv = await crypto.subtle.importKey(
-      'jwk',
-      jwkPriv,
-      { name: 'ECDSA', namedCurve: 'P-256' },
-      false,
-      ['sign'],
-    );
-    return { privateKey: nonExtractablePriv, publicKeySpkiB64 };
+    if (!ecdhPrivateKey || !ecdhPublicKeySpkiB64) {
+      const kpEcdh = await crypto.subtle.generateKey(
+        { name: 'ECDH', namedCurve: 'P-256' },
+        false, // NON-EXTRACTIBLE
+        ['deriveKey', 'deriveBits'],
+      );
+      const spkiEcdhPub = await crypto.subtle.exportKey('spki', kpEcdh.publicKey);
+      ecdhPublicKeySpkiB64 = toBase64(new Uint8Array(spkiEcdhPub));
+      ecdhPrivateKey = kpEcdh.privateKey;
+
+      await Promise.all([
+        idbSet('tm_ecdh_priv_v3', kpEcdh.privateKey),
+        idbSet('tm_ecdh_pub_v3', ecdhPublicKeySpkiB64),
+      ]);
+      // Purge de sécurité des anciennes clés en clair du localStorage
+      try {
+        localStorage.removeItem('tm_ecdh_priv');
+        localStorage.removeItem('tm_ecdh_pub');
+      } catch { /* ignore */ }
+    }
+
+    return {
+      privateKey,
+      publicKeySpkiB64,
+      ecdhPrivateKey,
+      ecdhPublicKeySpkiB64,
+    };
   }
 
   private async importVerifyKey(spkiB64: string): Promise<CryptoKey | null> {
@@ -195,6 +337,136 @@ export class CryptoService {
     }
   }
 
+  private async importEcdhKey(spkiB64: string): Promise<CryptoKey | null> {
+    const cached = this.importedEcdhKeys.get(spkiB64);
+    if (cached) return cached;
+    try {
+      const bytes = fromBase64(spkiB64);
+      const key = await crypto.subtle.importKey(
+        'spki',
+        bytes,
+        { name: 'ECDH', namedCurve: 'P-256' },
+        false,
+        [],
+      );
+      if (this.importedEcdhKeys.size > 200) this.importedEcdhKeys.clear();
+      this.importedEcdhKeys.set(spkiB64, key);
+      return key;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Enveloppe un secret de rôle (256 bits) spécifiquement pour la clé ECDH publique d'un participant
+   * via accord de clés Diffie-Hellman ECDH P-256 + dérivation HKDF + AES-256-GCM.
+   */
+  async wrapSecretForPeer(peerEcdhSpkiB64: string, secretHex: string): Promise<{ iv: string; ct: string }> {
+    const identity = await this.getDeviceIdentity();
+    const peerKey = await this.importEcdhKey(peerEcdhSpkiB64);
+    if (!peerKey) throw new Error('Clé ECDH invalide.');
+
+    const sharedBits = await crypto.subtle.deriveBits(
+      { name: 'ECDH', public: peerKey },
+      identity.ecdhPrivateKey,
+      256,
+    );
+    const hkdfKey = await crypto.subtle.importKey('raw', sharedBits, 'HKDF', false, ['deriveKey']);
+    const enc = new TextEncoder();
+    const wrapKey = await crypto.subtle.deriveKey(
+      {
+        name: 'HKDF',
+        hash: 'SHA-256',
+        salt: enc.encode('TM-RoleKeyWrap-Salt-v2'),
+        info: enc.encode('role-secret-key-wrap-v2'),
+      },
+      hkdfKey,
+      { name: 'AES-GCM', length: 256 },
+      false,
+      ['encrypt'],
+    );
+    const iv = new Uint8Array(12);
+    crypto.getRandomValues(iv);
+    const ct = await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv, tagLength: 128 },
+      wrapKey,
+      enc.encode(secretHex),
+    );
+    return { iv: toBase64(iv), ct: toBase64(new Uint8Array(ct)) };
+  }
+
+  /**
+   * Déchiffre un ticket de rôle enveloppé reçu via accord de clés ECDH P-256.
+   */
+  async unwrapSecretFromPeer(peerEcdhSpkiB64: string, ivB64: string, ctB64: string): Promise<string | null> {
+    try {
+      const identity = await this.getDeviceIdentity();
+      const peerKey = await this.importEcdhKey(peerEcdhSpkiB64);
+      if (!peerKey) return null;
+
+      const sharedBits = await crypto.subtle.deriveBits(
+        { name: 'ECDH', public: peerKey },
+        identity.ecdhPrivateKey,
+        256,
+      );
+      const hkdfKey = await crypto.subtle.importKey('raw', sharedBits, 'HKDF', false, ['deriveKey']);
+      const enc = new TextEncoder();
+      const wrapKey = await crypto.subtle.deriveKey(
+        {
+          name: 'HKDF',
+          hash: 'SHA-256',
+          salt: enc.encode('TM-RoleKeyWrap-Salt-v2'),
+          info: enc.encode('role-secret-key-wrap-v2'),
+        },
+        hkdfKey,
+        { name: 'AES-GCM', length: 256 },
+        false,
+        ['decrypt'],
+      );
+      const iv = fromBase64(ivB64);
+      const ct = fromBase64(ctB64);
+      const plain = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv, tagLength: 128 },
+        wrapKey,
+        ct,
+      );
+      return new TextDecoder().decode(plain);
+    } catch {
+      return null;
+    }
+  }
+
+  /** Installe une clé dynamique AES-256-GCM Zero-Knowledge dérivée pour un rôle donné. */
+  async installDynamicRoleKey(scope: 'h' | 'a', secretHex: string): Promise<void> {
+    const enc = new TextEncoder();
+    const rawKey = await crypto.subtle.importKey(
+      'raw',
+      enc.encode(`TM-DynamicRole-Secret::${secretHex}`),
+      'PBKDF2',
+      false,
+      ['deriveBits'],
+    );
+    const bits = await crypto.subtle.deriveBits(
+      {
+        name: 'PBKDF2',
+        salt: enc.encode(`TM-RoleSalt-Dynamic-v2::${scope}`),
+        iterations: 20_000,
+        hash: 'SHA-256',
+      },
+      rawKey,
+      256,
+    );
+    const key = await crypto.subtle.importKey(
+      'raw',
+      bits,
+      { name: 'AES-GCM', length: 256 },
+      false,
+      ['encrypt', 'decrypt'],
+    );
+    if (scope === 'h') this.dynamicHunterKey = key;
+    if (scope === 'a') this.dynamicAllyKey = key;
+  }
+
   /** Retourne l'identifiant de canal aveugle (SHA-256) dérivé du code de session. */
   async getBlindTopic(code: string, deviceSecret: string): Promise<string> {
     const suite = await this.getSuite(code, deviceSecret);
@@ -204,10 +476,11 @@ export class CryptoService {
   /** Prépare et met en cache la suite de clés AES-256-GCM pour la session `code`. */
   private getSuite(code: string, deviceSecret: string): Promise<SessionKeySuite> {
     const cleanCode = code.trim().toUpperCase();
-    if (this.currentCode === cleanCode && this.suitePromise) {
+    const cacheKey = `${cleanCode}:${this.sessionSecret ?? ''}`;
+    if (this.currentCode === cacheKey && this.suitePromise) {
       return this.suitePromise;
     }
-    this.currentCode = cleanCode;
+    this.currentCode = cacheKey;
     this.seenNonces.clear();
     this.suitePromise = this.deriveSuite(cleanCode, deviceSecret);
     return this.suitePromise;
@@ -215,17 +488,23 @@ export class CryptoService {
 
   private async deriveSuite(code: string, deviceSecret: string): Promise<SessionKeySuite> {
     const enc = new TextEncoder();
+    const entropyMaterial = this.sessionSecret
+      ? `TM-E2EE-V2::${code}::${this.sessionSecret}`
+      : `TM-E2EE-V2::${code}`;
     const baseKey = await crypto.subtle.importKey(
       'raw',
-      enc.encode(`TM-E2EE-V2::${code}`),
+      enc.encode(entropyMaterial),
       'PBKDF2',
       false,
       ['deriveBits'],
     );
+    const saltString = this.sessionSecret
+      ? `TrackerMan-GovSec-EU-Salt-v2::${code}::${this.sessionSecret}`
+      : `TrackerMan-GovSec-EU-Salt-v2::${code}`;
     const masterBits = await crypto.subtle.deriveBits(
       {
         name: 'PBKDF2',
-        salt: enc.encode(`TrackerMan-GovSec-EU-Salt-v2::${code}`),
+        salt: enc.encode(saltString),
         iterations: PBKDF2_ITERATIONS,
         hash: 'SHA-256',
       },
@@ -293,8 +572,8 @@ export class CryptoService {
   }
 
   private pickKey(suite: SessionKeySuite, scope: KeyScope): CryptoKey {
-    if (scope === 'h') return suite.hunterKey;
-    if (scope === 'a') return suite.allyKey;
+    if (scope === 'h') return this.dynamicHunterKey ?? suite.hunterKey;
+    if (scope === 'a') return this.dynamicAllyKey ?? suite.allyKey;
     return suite.sessionKey;
   }
 
@@ -380,6 +659,7 @@ export class CryptoService {
         (env.k !== 's' && env.k !== 'h' && env.k !== 'a') ||
         typeof env.t !== 'string' ||
         typeof env.u !== 'string' ||
+        !isValidUid(env.u) ||
         typeof env.ts !== 'number' ||
         !Number.isFinite(env.ts) ||
         typeof env.n !== 'string' ||
@@ -392,7 +672,10 @@ export class CryptoService {
         return null;
       }
 
-      if (!allowHistoricalTimestamp && Math.abs(nowMs - env.ts) > MAX_CLOCK_SKEW_MS) {
+      // Protection anti-rejeu et anti-retard stricte sur les positions en temps réel
+      const isRealtime = env.t === 'hunter_pos' || env.t === 'ally_pos' || env.t === 'circle';
+      const maxSkew = isRealtime ? REALTIME_MAX_CLOCK_SKEW_MS : MAX_CLOCK_SKEW_MS;
+      if (!allowHistoricalTimestamp && Math.abs(nowMs - env.ts) > maxSkew) {
         return null;
       }
 
@@ -400,6 +683,12 @@ export class CryptoService {
       if (this.seenNonces.has(replayKey)) {
         return null;
       }
+      // Dédoublonnage immédiat avant opérations cryptographiques coûteuses (anti-DDoS CPU)
+      if (this.seenNonces.size >= MAX_REPLAY_CACHE) {
+        const first = this.seenNonces.values().next().value;
+        if (first) this.seenNonces.delete(first);
+      }
+      this.seenNonces.add(replayKey);
 
       const verifyKey = await this.importVerifyKey(env.pk);
       if (!verifyKey) return null;
@@ -429,12 +718,6 @@ export class CryptoService {
         key,
         ciphertext,
       );
-
-      if (this.seenNonces.size >= MAX_REPLAY_CACHE) {
-        const first = this.seenNonces.values().next().value;
-        if (first) this.seenNonces.delete(first);
-      }
-      this.seenNonces.add(replayKey);
 
       const data = JSON.parse(new TextDecoder().decode(plainBuf)) as T;
       return {

@@ -47,6 +47,7 @@ export interface Player {
   catch_code: string;        // toujours '****' sur le réseau (le vrai code reste sur l'appareil du joueur)
   catch_commitment?: string; // engagement PBKDF2-SHA-256 (60 000 itérations) du code chasseur
   pub_key?: string;          // clé publique ECDSA P-256 (SPKI Base64) authentifiant chaque action
+  ecdh_key?: string;         // clé publique ECDH P-256 (SPKI Base64) pour l'accord de clés Zero-Knowledge
   joined_at: number;
   caught_by: string | null;  // ID du chasseur ou 'ZONE' si éliminé hors zone
   caught_at: number | null;

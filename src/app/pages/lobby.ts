@@ -182,7 +182,10 @@ export class LobbyView {
     effect(() => {
       const code = this.s()?.code;
       if (!code) return;
-      const url = `${location.origin}${location.pathname}#/?code=${code}`;
+      const k = this.game.sessionKey();
+      const url = k
+        ? `${location.origin}${location.pathname}#/?code=${code}&k=${k}`
+        : `${location.origin}${location.pathname}#/?code=${code}`;
       QRCode.toDataURL(url, {
         width: 360,
         margin: 2,
@@ -249,7 +252,10 @@ export class LobbyView {
 
   async share() {
     const code = this.s().code;
-    const url = `${location.origin}${location.pathname}#/?code=${code}`;
+    const k = this.game.sessionKey();
+    const url = k
+      ? `${location.origin}${location.pathname}#/?code=${code}&k=${k}`
+      : `${location.origin}${location.pathname}#/?code=${code}`;
     const text = `Rejoins ma partie Tracker Man ! Code : ${code}`;
     try {
       if (navigator.share) await navigator.share({ title: 'Tracker Man', text, url });

@@ -1,7 +1,7 @@
 import { Injectable, computed, effect, inject, signal, untracked } from '@angular/core';
 import { AllyShareMode, Circle, GameEvent, Player, Pos, Role, Session, Settings } from './models';
 import { destPoint, distance, randomCode, secureRandomUnit, secureShuffle, vibrate } from './utils';
-import { CryptoService, E2eeEnvelope, isValidLatLng, isValidRadius, sanitizeName } from './crypto.service';
+import { CryptoService, E2eeEnvelope, EncryptedRoleTicket, isValidLatLng, isValidRadius, isValidUid, sanitizeCoord, sanitizeName } from './crypto.service';
 import { P2pSessionMesh, RtcSignalPayload } from './p2p-transport';
 import { ToastService } from './toast.service';
 
@@ -66,6 +66,7 @@ export class GameService {
 
   // ---- État réactif (100 % en mémoire vive RAM) ----
   readonly code = signal<string | null>(null);
+  readonly sessionKey = signal<string | null>(null);
   readonly session = signal<Session | null>(null);
   readonly players = signal<Record<string, Player>>({});
   readonly events = signal<GameEvent[]>([]);
@@ -134,6 +135,9 @@ export class GameService {
   private myCurrentCommitment = '';
   private failedCatchAttempts = 0;
   private catchLockedUntil = 0;
+  private currentHunterSecret: string | null = null;
+  private currentAllySecret: string | null = null;
+  private peerLastPos = new Map<string, { lat: number; lng: number; t: number }>();
   private joinResolvers: Array<{ resolve: () => void; reject: (err: Error) => void }> = [];
   private openTimeout: ReturnType<typeof setTimeout> | null = null;
 
@@ -201,12 +205,43 @@ export class GameService {
 
   serverNow() { return Date.now() + this.offset; }
 
+  /** Validation de plausibilité physique distribuée contre le spoofing GPS et la téléportation. */
+  private validatePeerVelocity(peerId: string, newPos: Pos): boolean {
+    const prev = this.peerLastPos.get(peerId);
+    if (!prev) {
+      this.peerLastPos.set(peerId, newPos);
+      return true;
+    }
+    const dtSec = Math.max(1, (newPos.t - prev.t) / 1000);
+    const dist = distance(prev, newPos);
+    const speed = dist / dtSec;
+
+    // Vitesse max plausible : 45 m/s (~162 km/h). Au-delà sur distance significative (> 150 m), rejet de la trame.
+    if (speed > 45 && dist > 150) {
+      return false;
+    }
+    this.peerLastPos.set(peerId, newPos);
+    return true;
+  }
+
   // =================================================================
   // Connexion au maillage P2P E2EE (Zéro Serveur / Zéro Base de Données)
   // =================================================================
-  open(code: string) {
+  open(code: string, explicitKey?: string) {
     const cleanCode = code.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
     if (cleanCode.length !== 6) return;
+
+    let secretKey = explicitKey;
+    if (!secretKey && typeof window !== 'undefined') {
+      const hashParams = new URLSearchParams(window.location.hash.replace(/^[#/?]+/, '?'));
+      secretKey = hashParams.get('k') || sessionStorage.getItem(`tm_sk_${cleanCode}`) || undefined;
+    }
+    if (secretKey) {
+      try { sessionStorage.setItem(`tm_sk_${cleanCode}`, secretKey); } catch { /* ignore */ }
+      this.sessionKey.set(secretKey);
+      this.crypto.setSessionSecret(secretKey);
+    }
+
     if (this.code() === cleanCode && this.mesh) return;
 
     const existingSession = this.session()?.code === cleanCode ? this.session() : null;
@@ -289,6 +324,7 @@ export class GameService {
       await this.sendP2p('s', 'join_req', {
         name: myName,
         pubKey: identity.publicKeySpkiB64,
+        ecdhKey: identity.ecdhPublicKeySpkiB64,
         catchCommitment: this.myCurrentCommitment,
       });
     } else {
@@ -303,15 +339,22 @@ export class GameService {
   close() {
     if (this.openTimeout) clearTimeout(this.openTimeout);
     this.openTimeout = null;
+    const c = this.code();
+    if (c) this.removeEncryptedSnapshot(c);
+    this.clearLocalTracks();
     if (this.mesh) this.mesh.close();
     this.mesh = null;
     this.peerLastSeen.clear();
+    this.peerLastPos.clear();
     this.code.set(null);
+    this.sessionKey.set(null);
     this.session.set(null);
     this.players.set({});
     this.events.set([]);
     this.online.set(new Set());
     this.allyExactPos.set({});
+    this.currentHunterSecret = null;
+    this.currentAllySecret = null;
     this.crypto.clearSessionKeys();
     this.loaded.set(false);
     this.stopPlaying();
@@ -410,6 +453,8 @@ export class GameService {
     const code = this.code();
     if (!code) return;
 
+    if (!isValidUid(rawEnv.u)) return;
+
     const myRole = this.me()?.role;
     if (rawEnv.k === 'h' && myRole && myRole !== 'hunter') return;
     if (rawEnv.k === 'a' && myRole && myRole !== 'hunted') return;
@@ -422,7 +467,7 @@ export class GameService {
       this.serverNow(),
       allowHist,
     );
-    if (!pkt || pkt.senderUid === this.uid) return;
+    if (!pkt || pkt.senderUid === this.uid || !isValidUid(pkt.senderUid)) return;
 
     this.markPeerSeen(pkt.senderUid);
 
@@ -461,7 +506,7 @@ export class GameService {
       }
 
       case 'join_req': {
-        const d = pkt.data as { name?: string; pubKey?: string; catchCommitment?: string } | null;
+        const d = pkt.data as { name?: string; pubKey?: string; ecdhKey?: string; catchCommitment?: string } | null;
         const s = this.session();
         if (!d || !s) return;
         const existing = this.players()[pkt.senderUid];
@@ -473,11 +518,15 @@ export class GameService {
               ...existing,
               name: cleanName,
               pub_key: existing.pub_key ?? pkt.senderPubKey,
+              ecdh_key: d.ecdhKey || existing.ecdh_key,
               catch_commitment: d.catchCommitment || existing.catch_commitment,
             },
           }));
           if (this.isHost() || !this.online().has(s.host_id)) {
             void this.broadcastFullStateSync();
+            if (s.status === 'playing') {
+              void this.dispatchRoleKeyToPlayer(pkt.senderUid);
+            }
           }
           void this.persistEncryptedSnapshot();
           return;
@@ -501,6 +550,7 @@ export class GameService {
           catch_code: '****',
           catch_commitment: d.catchCommitment ?? '',
           pub_key: pkt.senderPubKey,
+          ecdh_key: d.ecdhKey ?? '',
           joined_at: pkt.ts,
           caught_by: null,
           caught_at: null,
@@ -521,6 +571,9 @@ export class GameService {
         if (s) {
           if (this.isHost() || !this.online().has(s.host_id)) {
             void this.broadcastFullStateSync();
+            if (this.isHost() && s.status === 'playing') {
+              void this.dispatchRoleKeyToPlayer(pkt.senderUid);
+            }
           }
           this.respondRealtimeState();
         }
@@ -596,7 +649,8 @@ export class GameService {
         const canClaimHost = d.claimHost && s.status === 'lobby' && !this.online().has(s.host_id);
         if (!isCurrentHost && !canClaimHost) return;
 
-        this.session.update((cur) => (cur ? { ...cur, ...d } : cur));
+        const cleanPatch = d.settings ? { ...d, settings: this.sanitizeSettings(d.settings) } : d;
+        this.session.update((cur) => (cur ? { ...cur, ...cleanPatch } : cur));
         void this.persistEncryptedSnapshot();
         return;
       }
@@ -662,12 +716,33 @@ export class GameService {
         return;
       }
 
+      case 'role_keys': {
+        const s = this.session();
+        if (!s || pkt.senderUid !== s.host_id) return;
+        const d = pkt.data as { tickets?: EncryptedRoleTicket[] } | null;
+        if (!d || !Array.isArray(d.tickets)) return;
+        const myTicket = d.tickets.find((t) => t.targetUid === this.uid);
+        if (!myTicket) return;
+        const hostPlayer = this.players()[s.host_id];
+        if (!hostPlayer?.ecdh_key) return;
+        const secret = await this.crypto.unwrapSecretFromPeer(hostPlayer.ecdh_key, myTicket.iv, myTicket.ct);
+        if (secret) {
+          const scope = myTicket.role === 'hunter' ? 'h' : 'a';
+          await this.crypto.installDynamicRoleKey(scope, secret);
+        }
+        return;
+      }
+
       case 'caught': {
         const s = this.session();
         if (!s || s.status !== 'playing') return;
         const d = pkt.data as { victimId: string; hunterId: string; caughtAt: number; event: GameEvent } | null;
         if (!d || pkt.senderUid !== d.victimId) return;
         this.applyPlayerCaught(d.victimId, d.hunterId, d.caughtAt, d.event);
+        if (this.isHost()) {
+          void this.rotateAllyKeyOnCapture(d.victimId);
+          void this.dispatchRoleKeyToPlayer(d.victimId);
+        }
         return;
       }
 
@@ -677,6 +752,10 @@ export class GameService {
         const d = pkt.data as { victimId: string; caughtAt: number; event: GameEvent } | null;
         if (!d || pkt.senderUid !== d.victimId) return;
         this.applyPlayerCaught(d.victimId, 'ZONE', d.caughtAt, d.event);
+        if (this.isHost()) {
+          void this.rotateAllyKeyOnCapture(d.victimId);
+          void this.dispatchRoleKeyToPlayer(d.victimId);
+        }
         return;
       }
 
@@ -685,6 +764,10 @@ export class GameService {
         if (!s || s.status !== 'playing') return;
         const d = pkt.data as { endedAt: number; winner: 'hunted' | 'hunters' } | null;
         if (!d) return;
+        const isFromHost = pkt.senderUid === s.host_id;
+        const timeUp = s.end_at != null && this.now() >= s.end_at - 10000;
+        const allCaught = this.alive().length === 0;
+        if (!isFromHost && !timeUp && !allCaught) return;
         this.applyEndGame(d.endedAt, d.winner);
         return;
       }
@@ -706,7 +789,8 @@ export class GameService {
           return;
         }
         if (!d || !isValidLatLng(d.lat, d.lng)) return;
-        const pos: Pos = { lat: d.lat!, lng: d.lng!, t: pkt.ts };
+        const pos: Pos = { lat: sanitizeCoord(d.lat!), lng: sanitizeCoord(d.lng!), t: pkt.ts };
+        if (!this.validatePeerVelocity(pkt.senderUid, pos)) return;
         this.players.update((m) =>
           m[pkt.senderUid] ? { ...m, [pkt.senderUid]: { ...m[pkt.senderUid], pos, seen: pkt.ts } } : m,
         );
@@ -725,8 +809,8 @@ export class GameService {
         const c = d.circle;
         if (!c || !isValidLatLng(c.lat, c.lng) || !isValidRadius(c.r)) return;
         const validCircle: Circle = {
-          lat: c.lat,
-          lng: c.lng,
+          lat: sanitizeCoord(c.lat),
+          lng: sanitizeCoord(c.lng),
           r: Math.round(c.r),
           t: typeof c.t === 'number' && Number.isFinite(c.t) ? c.t : pkt.ts,
           allyShare: !!c.allyShare,
@@ -749,10 +833,55 @@ export class GameService {
           });
           return;
         }
+        const pos: Pos = { lat: sanitizeCoord(d.lat!), lng: sanitizeCoord(d.lng!), t: pkt.ts };
+        if (!this.validatePeerVelocity(pkt.senderUid, pos)) return;
         this.allyExactPos.update((m) => ({
           ...m,
-          [pkt.senderUid]: { lat: d.lat!, lng: d.lng!, t: pkt.ts },
+          [pkt.senderUid]: pos,
         }));
+        return;
+      }
+
+      case 'catch_probe': {
+        const s = this.session();
+        if (!s || s.status !== 'playing' || this.me()?.role !== 'hunter') return;
+        const d = pkt.data as { targetHunter?: string; iv?: string; ct?: string } | null;
+        if (!d || d.targetHunter !== this.uid || !d.iv || !d.ct) return;
+
+        const sender = this.players()[pkt.senderUid];
+        if (!sender?.ecdh_key) return;
+
+        try {
+          const raw = await this.crypto.unwrapSecretFromPeer(sender.ecdh_key, d.iv, d.ct);
+          if (!raw) return;
+          const probe = JSON.parse(raw) as { pin?: string; victimId?: string; ts?: number };
+          if (probe.pin === this.myCatchCode() && probe.victimId === pkt.senderUid) {
+            const now = this.serverNow();
+            const ev: GameEvent = {
+              id: now + Math.floor(secureRandomUnit() * 1000),
+              session_code: code,
+              type: 'caught',
+              t: now,
+              data: {
+                victim: probe.victimId,
+                victimName: sender.name,
+                hunter: this.uid,
+                hunterName: this.me()!.name,
+              },
+            };
+            this.applyPlayerCaught(probe.victimId, this.uid, now, ev);
+            await this.sendP2p('s', 'caught', {
+              victimId: probe.victimId,
+              hunterId: this.uid,
+              caughtAt: now,
+              event: ev,
+            });
+            if (this.isHost()) {
+              void this.rotateAllyKeyOnCapture(probe.victimId);
+              void this.dispatchRoleKeyToPlayer(probe.victimId);
+            }
+          }
+        } catch { /* ignore */ }
         return;
       }
 
@@ -786,16 +915,16 @@ export class GameService {
       const pos = this.myPos();
       if (m.role === 'hunter' && pos) {
         void this.sendP2p('h', 'hunter_pos', {
-          lat: Number(pos.lat.toFixed(5)),
-          lng: Number(pos.lng.toFixed(5)),
+          lat: sanitizeCoord(pos.lat),
+          lng: sanitizeCoord(pos.lng),
           t: this.serverNow(),
         });
       } else if (m.role === 'hunted' && this.lastCircle) {
         void this.sendP2p('s', 'circle', { circle: this.lastCircle });
         if (this.allyShareMode() === 'exact' && pos) {
           void this.sendP2p('a', 'ally_pos', {
-            lat: Number(pos.lat.toFixed(5)),
-            lng: Number(pos.lng.toFixed(5)),
+            lat: sanitizeCoord(pos.lat),
+            lng: sanitizeCoord(pos.lng),
             t: this.serverNow(),
           });
         }
@@ -874,8 +1003,8 @@ export class GameService {
     if (t - this.lastAllyBroadcast < 3000) return;
     this.lastAllyBroadcast = t;
     void this.sendP2p('a', 'ally_pos', {
-      lat: Number(pos.lat.toFixed(5)),
-      lng: Number(pos.lng.toFixed(5)),
+      lat: sanitizeCoord(pos.lat),
+      lng: sanitizeCoord(pos.lng),
       t,
     });
   }
@@ -887,6 +1016,10 @@ export class GameService {
     const cleanName = sanitizeName(name);
     this.clearLocalTracks();
     const code = randomCode();
+    const sessionKey = this.crypto.generateSecureToken(16); // 128 bits d'entropie cryptographique
+    try { sessionStorage.setItem(`tm_sk_${code}`, sessionKey); } catch { /* ignore */ }
+    this.sessionKey.set(sessionKey);
+    this.crypto.setSessionSecret(sessionKey);
     const identity = await this.crypto.getDeviceIdentity();
     const now = Date.now();
     await this.refreshMyCatchCodeAndCommitment(code, 0);
@@ -895,7 +1028,7 @@ export class GameService {
       code,
       host_id: this.uid,
       status: 'lobby',
-      settings: { ...settings },
+      settings: this.sanitizeSettings(settings),
       start_at: null,
       end_at: null,
       winner: null,
@@ -911,6 +1044,7 @@ export class GameService {
       catch_code: '****',
       catch_commitment: this.myCurrentCommitment,
       pub_key: identity.publicKeySpkiB64,
+      ecdh_key: identity.ecdhPublicKeySpkiB64,
       joined_at: now,
       caught_by: null,
       caught_at: null,
@@ -995,6 +1129,8 @@ export class GameService {
   private clearLocalTracks() {
     this.myTrack = [];
     this.lastCircle = null;
+    this.allyExactPos.set({});
+    this.lastValidGps = null;
     this.purgeLegacyStorage();
     try {
       for (const k of Object.keys(sessionStorage)) {
@@ -1013,10 +1149,43 @@ export class GameService {
     await this.persistEncryptedSnapshot();
   }
 
+  private sanitizeSettings(raw: Settings): Settings {
+    const total = Math.min(720, Math.max(1, Math.round(Number(raw.total) || 60)));
+    const headStart = Math.min(60, Math.max(0, Math.round(Number(raw.headStart) || 0)));
+    const radiusStart = Math.min(100_000, Math.max(10, Math.round(Number(raw.radiusStart) || 500)));
+    const radiusEnd = Math.min(50_000, Math.max(5, Math.round(Number(raw.radiusEnd) || 50)));
+    const shrinkEvery = Math.min(60, Math.max(1, Math.round(Number(raw.shrinkEvery) || 10)));
+    const hunters = Math.min(50, Math.max(1, Math.round(Number(raw.hunters) || 1)));
+    const roleMode = raw.roleMode === 'manual' ? 'manual' : 'random';
+    const outGraceSec = Math.min(600, Math.max(5, Math.round(Number(raw.outGraceSec) || 30)));
+    const circleRefreshSec = raw.circleRefreshSec ? Math.min(300, Math.max(5, Math.round(Number(raw.circleRefreshSec)))) : null;
+    let zone = null;
+    if (raw.zone && isValidLatLng(raw.zone.lat, raw.zone.lng) && isValidRadius(raw.zone.r)) {
+      zone = {
+        lat: sanitizeCoord(raw.zone.lat),
+        lng: sanitizeCoord(raw.zone.lng),
+        r: Math.round(raw.zone.r),
+      };
+    }
+    return {
+      total,
+      headStart,
+      radiusStart,
+      radiusEnd,
+      shrinkEvery,
+      hunters,
+      roleMode,
+      outGraceSec,
+      circleRefreshSec,
+      zone,
+    };
+  }
+
   async updateSettings(settings: Settings) {
     if (!this.isHost()) return;
-    this.session.update((s) => (s ? { ...s, settings: { ...settings } } : s));
-    await this.sendP2p('s', 'session_patch', { settings: { ...settings } });
+    const cleanSettings = this.sanitizeSettings(settings);
+    this.session.update((s) => (s ? { ...s, settings: { ...cleanSettings } } : s));
+    await this.sendP2p('s', 'session_patch', { settings: { ...cleanSettings } });
     await this.broadcastFullStateSync();
     await this.persistEncryptedSnapshot();
   }
@@ -1075,9 +1244,54 @@ export class GameService {
       data: {},
     };
 
+    // Accord de clés Zero-Knowledge : génération de secrets de rôles distincts
+    const hunterSecret = this.crypto.generateSecureToken(32);
+    const allySecret = this.crypto.generateSecureToken(32);
+    this.currentHunterSecret = hunterSecret;
+    this.currentAllySecret = allySecret;
+
+    const hostRole: Role = hunters.includes(this.uid) ? 'hunter' : 'hunted';
+    if (hostRole === 'hunter') {
+      await this.crypto.installDynamicRoleKey('h', hunterSecret);
+    } else {
+      await this.crypto.installDynamicRoleKey('a', allySecret);
+    }
+
+    const tickets: EncryptedRoleTicket[] = [];
+    for (const p of this.sortedPlayers()) {
+      if (p.id === this.uid || !p.ecdh_key) continue;
+      const targetRole: Role = hunters.includes(p.id) ? 'hunter' : 'hunted';
+      const secretToWrap = targetRole === 'hunter' ? hunterSecret : allySecret;
+      try {
+        const wrap = await this.crypto.wrapSecretForPeer(p.ecdh_key, secretToWrap);
+        tickets.push({ targetUid: p.id, role: targetRole, iv: wrap.iv, ct: wrap.ct });
+      } catch { /* ignore */ }
+    }
+
     await this.applyStartGame(startAt, endAt, hunters, startEvent);
     await this.sendP2p('s', 'start_game', { startAt, endAt, hunters, event: startEvent });
+    if (tickets.length > 0) {
+      await this.sendP2p('s', 'role_keys', { tickets });
+    }
     await this.broadcastFullStateSync();
+  }
+
+  private async dispatchRoleKeyToPlayer(targetUid: string) {
+    if (!this.isHost() || !this.currentHunterSecret || !this.currentAllySecret) return;
+    const targetPlayer = this.players()[targetUid];
+    if (!targetPlayer || !targetPlayer.ecdh_key) return;
+    const targetRole = targetPlayer.role;
+    const secret = targetRole === 'hunter' ? this.currentHunterSecret : this.currentAllySecret;
+    try {
+      const wrap = await this.crypto.wrapSecretForPeer(targetPlayer.ecdh_key, secret);
+      const ticket: EncryptedRoleTicket = {
+        targetUid,
+        role: targetRole,
+        iv: wrap.iv,
+        ct: wrap.ct,
+      };
+      await this.sendP2p('s', 'role_keys', { tickets: [ticket] });
+    } catch { /* ignore */ }
   }
 
   private async applyStartGame(startAt: number, endAt: number, hunters: string[], startEvent: GameEvent) {
@@ -1143,17 +1357,27 @@ export class GameService {
     const hunters = this.sortedPlayers().filter((p) => p.role === 'hunter' && p.id !== this.uid);
     let matchedHunter: Player | null = null;
 
+    // Émet une sonde de capture chiffrée en accord de clés ECDH vers les chasseurs
     for (const h of hunters) {
-      if (!h.catch_commitment) continue;
-      const candidateCommitment = await this.crypto.computeCatchCommitment(
-        code,
-        s.start_at ?? 0,
-        h.id,
-        cleanCatchCode,
-      );
-      if (candidateCommitment === h.catch_commitment) {
-        matchedHunter = h;
-        break;
+      if (h.ecdh_key) {
+        try {
+          const wrap = await this.crypto.wrapSecretForPeer(
+            h.ecdh_key,
+            JSON.stringify({ pin: cleanCatchCode, victimId: this.uid, ts: now })
+          );
+          void this.sendP2p('s', 'catch_probe', { targetHunter: h.id, iv: wrap.iv, ct: wrap.ct });
+        } catch { /* ignore */ }
+      }
+      if (!matchedHunter && h.catch_commitment) {
+        const candidateCommitment = await this.crypto.computeCatchCommitment(
+          code,
+          s.start_at ?? 0,
+          h.id,
+          cleanCatchCode,
+        );
+        if (candidateCommitment === h.catch_commitment) {
+          matchedHunter = h;
+        }
       }
     }
 
@@ -1192,7 +1416,39 @@ export class GameService {
     });
   }
 
+  private async rotateAllyKeyOnCapture(capturedUid: string) {
+    if (!this.isHost()) return;
+    const newAllySecret = this.crypto.generateSecureToken(32);
+    this.currentAllySecret = newAllySecret;
+
+    if (this.me()?.role === 'hunted' && this.uid !== capturedUid) {
+      await this.crypto.installDynamicRoleKey('a', newAllySecret);
+    }
+
+    const survivingHunted = this.sortedPlayers().filter(
+      (p) => p.role === 'hunted' && p.id !== capturedUid && p.id !== this.uid && p.ecdh_key
+    );
+
+    const tickets: EncryptedRoleTicket[] = [];
+    for (const p of survivingHunted) {
+      try {
+        const wrap = await this.crypto.wrapSecretForPeer(p.ecdh_key!, newAllySecret);
+        tickets.push({ targetUid: p.id, role: 'hunted', iv: wrap.iv, ct: wrap.ct });
+      } catch { /* ignore */ }
+    }
+
+    if (tickets.length > 0) {
+      await this.sendP2p('s', 'role_keys', { tickets });
+    }
+  }
+
   private applyPlayerCaught(victimId: string, hunterIdOrZone: string, caughtAt: number, ev: GameEvent) {
+    if (victimId === this.uid) {
+      // Révocation immédiate et purge de la clé secrète des chassés de la RAM (Forward Secrecy)
+      this.crypto.revokeDynamicRoleKey('a');
+      this.allyExactPos.set({});
+    }
+
     this.players.update((m) =>
       m[victimId]
         ? {
@@ -1350,7 +1606,7 @@ export class GameService {
   }
 
   private claimHostIfNeeded(s: Session) {
-    if (Date.now() - this.openedAt < 9000) return;
+    if (Date.now() - this.openedAt < 25000) return; // Tolérance 25s pour éviter le split-brain sur latence réseau passagère
     const online = this.online();
     if (!online.has(this.uid) || online.has(s.host_id)) return;
     const first = this.sortedPlayers().find((p) => online.has(p.id));
@@ -1487,8 +1743,8 @@ export class GameService {
     if (last && t - this.lastTrackSample < 6000 && distance(pos, last) < 8) return;
     this.lastTrackSample = t;
     this.myTrack.push({
-      lat: Number(pos.lat.toFixed(5)),
-      lng: Number(pos.lng.toFixed(5)),
+      lat: sanitizeCoord(pos.lat),
+      lng: sanitizeCoord(pos.lng),
       t,
       role: m.role,
     });
@@ -1542,16 +1798,23 @@ export class GameService {
     if (!code || !m) return;
     if (!this.myTrack.length && this.myPos()) {
       const p = this.myPos()!;
-      this.myTrack = [{ lat: Number(p.lat.toFixed(5)), lng: Number(p.lng.toFixed(5)), t: this.serverNow(), role: m.role }];
+      this.myTrack = [{ lat: sanitizeCoord(p.lat), lng: sanitizeCoord(p.lng), t: this.serverNow(), role: m.role }];
     }
     if (!this.myTrack.length) return;
     this.trackFlushed = true;
 
     const now = this.serverNow();
-    this.recordTrackEvent(this.uid, m.name, this.myTrack, now);
+    // Minimisation RGPD (Art. 5.1.c) : quantification protectrice à 4 décimales (~11 m)
+    const sanitizedPoints: Pos[] = this.myTrack.map((pt) => ({
+      lat: Number(pt.lat.toFixed(4)),
+      lng: Number(pt.lng.toFixed(4)),
+      t: pt.t,
+      role: pt.role,
+    }));
+    this.recordTrackEvent(this.uid, m.name, sanitizedPoints, now);
     await this.sendP2p('s', 'track', {
       playerName: m.name,
-      points: this.myTrack,
+      points: sanitizedPoints,
     });
   }
 
@@ -1570,7 +1833,7 @@ export class GameService {
     if (m.role === 'hunter') {
       if (t - this.lastPosWrite > 4000) {
         this.lastPosWrite = t;
-        const p: Pos = { lat: Number(pos.lat.toFixed(5)), lng: Number(pos.lng.toFixed(5)), t };
+        const p: Pos = { lat: sanitizeCoord(pos.lat), lng: sanitizeCoord(pos.lng), t };
         this.players.update((map) =>
           map[this.uid] ? { ...map, [this.uid]: { ...map[this.uid], pos: p, seen: t } } : map,
         );
@@ -1600,7 +1863,7 @@ export class GameService {
       const offsetRatio = 0.12 + Math.sqrt(secureRandomUnit()) * 0.56;
       const bearing = secureRandomUnit() * 360;
       const center = destPoint(pos, radius * offsetRatio, bearing);
-      const circle: Circle = { lat: center.lat, lng: center.lng, r: radius, t: now, allyShare };
+      const circle: Circle = { lat: sanitizeCoord(center.lat), lng: sanitizeCoord(center.lng), r: radius, t: now, allyShare };
       this.lastCircle = circle;
       this.lastCircleBroadcast = now;
       this.setMyCircleInRam(circle);

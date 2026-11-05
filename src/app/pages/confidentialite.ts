@@ -59,8 +59,8 @@ import { RouterLink } from '@angular/router';
               <i>Finalité :</i> signer numériquement chaque action du joueur et de l'hôte afin de rendre toute usurpation d'identité mathématiquement impossible sans serveur central.
             </li>
             <li>
-              <b>Géolocalisation Peer-to-Peer chiffrée de bout en bout (E2EE) :</b><br>
-              <i>Protocole cryptographique :</i> les clés de session sont dérivées localement sur votre appareil à partir du code de la partie via <code>PBKDF2-HMAC-SHA-256</code> (210 000 itérations) et <code>HKDF-SHA-256</code> avec séparation cryptographique stricte des rôles (clé chasseurs, clé alliés chassés, clé de session). Chaque paquet est chiffré par <code>AES-256-GCM</code> (AEAD 256 bits avec vecteur d'initialisation CSPRNG 96 bits, tag d'authentification 128 bits, signature <code>ECDSA P-256</code> et protection anti-rejeu).<br>
+              <b>Géolocalisation Peer-to-Peer chiffrée de bout en bout (E2EE) & Accord de clés ECDH P-256 :</b><br>
+              <i>Protocole cryptographique :</i> les clés de session sont dérivées localement sur votre appareil à partir du code de la partie via <code>PBKDF2-HMAC-SHA-256</code> (250 000 itérations) et <code>HKDF-SHA-256</code> avec accord de clés asymétrique <code>ECDH P-256</code> (NIST SP 800-56A Rev 3) garantissant une séparation cryptographique Zero-Knowledge absolue des rôles (la clé chasseur n'est distribuée qu'aux chasseurs vérifiés, la clé alliés qu'aux chassés). Chaque paquet est chiffré par <code>AES-256-GCM</code> (AEAD 256 bits avec vecteur d'initialisation CSPRNG 96 bits, tag d'authentification 128 bits, signature <code>ECDSA P-256</code> et protection anti-rejeu stricte 25s pour le direct).<br>
               <i>Floutage spatial CSPRNG :</i> tant qu'un joueur a le rôle « Chassé », sa position exacte ne quitte <b>jamais</b> son téléphone (sauf partage volontaire chiffré entre alliés chassés) ; seul un cercle radar dont le centre est décalé aléatoirement via générateur cryptographique (<code>crypto.getRandomValues</code>) est diffusé.<br>
               <i>Zéro base de données :</i> aucune coordonnée GPS, aucun cercle et aucune trajectoire n'est jamais sauvegardé sur un serveur. Tout existe uniquement dans la mémoire vive (RAM) des téléphones des participants pendant la session.
             </li>
@@ -93,7 +93,7 @@ import { RouterLink } from '@angular/router';
             <b>Aucun cookie publicitaire ou de profilage :</b> aucun bandeau de consentement publicitaire n'est requis car aucun traceur commercial n'est déposé.
           </p>
           <p>
-            <b>Stockage technique strictement nécessaire :</b> seuls votre pseudonyme et vos clés cryptographiques locales sont conservés sur votre appareil. Tout état temporaire de manche en cours dans <code>sessionStorage</code> est chiffré en <code>AES-256-GCM</code> et détruit dès que vous quittez la partie ou fermez l'onglet.
+            <b>Stockage technique strictement nécessaire & Coffre non-extractible :</b> vos clés privées asymétriques <code>ECDSA / ECDH P-256</code> sont isolées avec l'attribut de sécurité <code>extractable: false</code> dans le stockage <code>IndexedDB</code> natif de votre navigateur, rendant toute exfiltration de vos clés privées techniquement impossible même en cas d'attaque XSS. Tout état temporaire de manche en cours dans <code>sessionStorage</code> est chiffré en <code>AES-256-GCM</code> et détruit dès que vous quittez la partie ou fermez l'onglet.
           </p>
         </div>
 
@@ -102,7 +102,7 @@ import { RouterLink } from '@angular/router';
           <p>Le Service applique les standards de sécurité européens et internationaux les plus exigeants :</p>
           <ul>
             <li>
-              <b>Protection applicative & Réseau :</b> politique stricte de sécurité du contenu (<code>Content-Security-Policy</code>), transport chiffré forcé <code>HSTS Preload</code> (TLS 1.3), isolation d'origine (<code>COOP / CORP</code>), politique <code>Referrer-Policy: no-referrer</code> et verrouillage des permissions matérielles (<code>Permissions-Policy</code>).
+              <b>Protection applicative & Réseau :</b> politique stricte de sécurité du contenu (<code>Content-Security-Policy</code>), transport chiffré forcé <code>HSTS Preload</code> (TLS 1.3), isolation d'origine (<code>COOP / CORP</code>), politique <code>Referrer-Policy: strict-origin-when-cross-origin</code> et verrouillage des permissions matérielles (<code>Permissions-Policy</code>).
             </li>
             <li>
               <b>Transmission P2P directe & Routage aveugle :</b> les appareils des joueurs communiquent via des canaux directs <code>WebRTC DataChannel</code> (chiffrés <code>DTLS 1.3</code> + <code>AES-256-GCM</code>) et un routage WebSocket éphémère en mémoire vive (<code>QoS 0, Retain 0</code>) sur un identifiant de canal haché aveugle <code>SHA-256</code>, sans aucune persistance disque.
