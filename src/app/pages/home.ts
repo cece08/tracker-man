@@ -112,7 +112,7 @@ export class HomePage {
   private checkName(): string | null {
     const n = sanitizeName(this.name());
     if (!n) { this.toast.show("Entre ton pseudo d'abord 🙂"); return null; }
-    if (!this.game.configured) { this.toast.show("Supabase n'est pas configuré (voir README)."); return null; }
+    if (!this.game.configured) { this.toast.show("Application non initialisée."); return null; }
     try { localStorage.setItem('tm_name', n); } catch { /* ignore */ }
     return n;
   }

@@ -7,7 +7,7 @@ const WSS_RELAYS = [
 ];
 
 const ICE_SERVERS: RTCIceServer[] = [
-  { urls: ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] },
+  { urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:stun.services.mozilla.com'] },
 ];
 
 function encodeVarInt(len: number): number[] {
@@ -93,6 +93,11 @@ export class P2pSessionMesh {
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private reconnectTimers: ReturnType<typeof setTimeout>[] = [];
   private connectedOnce = false;
+  private activeTopics: Set<string> = new Set();
+  private primaryTopic: string;
+
+  // Protection anti-DDoS CPU (filtrage de taux de paquets avant calculs cryptographiques)
+  private peerPacketRate = new Map<string, { count: number; windowStart: number }>();
 
   // Maillage WebRTC P2P direct (uid -> RTCPeerConnection / RTCDataChannel)
   private peers = new Map<string, RTCPeerConnection>();
@@ -100,20 +105,39 @@ export class P2pSessionMesh {
 
   constructor(
     private readonly myUid: string,
-    private readonly blindTopic: string,
+    topicOrTopics: string | string[],
     private readonly onEnvelope: (env: E2eeEnvelope) => void,
     private readonly onConnected: () => void,
     private readonly sendRtcSignalEnvelope: (signal: RtcSignalPayload) => void,
   ) {
+    const list = Array.isArray(topicOrTopics) ? topicOrTopics : [topicOrTopics];
+    this.primaryTopic = list[0] ?? '';
+    list.forEach((t) => { if (t) this.activeTopics.add(t); });
     this.initBroadcastChannel();
     this.initWssMesh();
     this.pingTimer = setInterval(() => this.sendPing(), 18_000);
   }
 
+  subscribeTopic(topic: string) {
+    if (!topic || this.activeTopics.has(topic)) return;
+    this.activeTopics.add(topic);
+    for (const ws of this.sockets) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try { ws.send(buildMqttSubscribe(topic)); } catch { /* ignore */ }
+      }
+    }
+  }
+
+  setPrimaryTopic(topic: string) {
+    if (!topic) return;
+    this.primaryTopic = topic;
+    this.subscribeTopic(topic);
+  }
+
   private initBroadcastChannel() {
     try {
       if (typeof BroadcastChannel !== 'undefined') {
-        this.bc = new BroadcastChannel(`tm_p2p_${this.blindTopic}`);
+        this.bc = new BroadcastChannel(`tm_p2p_${this.primaryTopic}`);
         this.bc.onmessage = (ev) => {
           if (this.closed || !ev.data) return;
           this.handleRawString(typeof ev.data === 'string' ? ev.data : JSON.stringify(ev.data));
@@ -183,9 +207,11 @@ export class P2pSessionMesh {
 
       const pktType = header & 0xf0;
       if (pktType === 0x20) {
-        // CONNACK -> SUBSCRIBE immédiatement au topic aveugle
+        // CONNACK -> SUBSCRIBE immédiatement à tous les topics actifs (blind + rendezvous)
         try {
-          ws.send(buildMqttSubscribe(this.blindTopic));
+          for (const top of this.activeTopics) {
+            ws.send(buildMqttSubscribe(top));
+          }
         } catch { /* ignore */ }
       } else if (pktType === 0x90) {
         // SUBACK -> canal prêt
@@ -209,9 +235,22 @@ export class P2pSessionMesh {
   }
 
   private handleRawString(raw: string) {
+    if (raw.length > 65536) return; // Rejet immédiat des trames disproportionnées
     try {
       const parsed = JSON.parse(raw) as E2eeEnvelope;
       if (parsed && parsed.v === 2 && parsed.u && parsed.u !== this.myUid) {
+        // Anti-DDoS CPU : limitation stricte de fréquence par UID émetteur avant toute opération WebCrypto
+        const now = Date.now();
+        const rate = this.peerPacketRate.get(parsed.u) ?? { count: 0, windowStart: now };
+        if (now - rate.windowStart > 1000) {
+          rate.count = 0;
+          rate.windowStart = now;
+        }
+        rate.count++;
+        this.peerPacketRate.set(parsed.u, rate);
+        if (rate.count > 12) {
+          return; // Dépassement de quota de messages (anti-flood CPU)
+        }
         this.onEnvelope(parsed);
       }
     } catch { /* paquet invalide ignoré */ }
@@ -228,7 +267,7 @@ export class P2pSessionMesh {
   }
 
   /** Diffuse une enveloppe chiffrée E2EE sur tous les canaux P2P (WebRTC DataChannels + BroadcastChannel + WSS Mesh). */
-  broadcast(env: E2eeEnvelope) {
+  broadcast(env: E2eeEnvelope, targetTopic?: string) {
     if (this.closed) return;
     const raw = JSON.stringify(env);
 
@@ -243,7 +282,8 @@ export class P2pSessionMesh {
     }
 
     // 3. Relais WSS éphémères (QoS 0, Retain 0)
-    const frame = buildMqttPublish(this.blindTopic, raw);
+    const topicToUse = targetTopic || this.primaryTopic;
+    const frame = buildMqttPublish(topicToUse, raw);
     for (const ws of this.sockets) {
       if (ws && ws.readyState === WebSocket.OPEN) {
         try { ws.send(frame); } catch { /* ignore */ }

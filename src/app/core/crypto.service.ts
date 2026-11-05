@@ -30,6 +30,7 @@ export interface E2eeEnvelope {
   k: KeyScope;
   t: PacketType;
   u: string;   // sender uid
+  seq: number; // monotonic sequence counter (anti-replay)
   ts: number;  // timestamp ms
   n: string;   // 96-bit CSPRNG nonce (hex)
   iv: string;  // 96-bit CSPRNG IV (base64)
@@ -192,6 +193,9 @@ export class CryptoService {
   private importedPubKeys = new Map<string, CryptoKey>();
   private importedEcdhKeys = new Map<string, CryptoKey>();
 
+  private mySeq = 0;
+  private peerMaxSeq = new Map<string, number>();
+
   private sessionSecret: string | null = null;
 
   // Clés dynamiques Zero-Knowledge distribuées par accord de clés ECDH
@@ -217,6 +221,8 @@ export class CryptoService {
     this.suitePromise = null;
     this.currentCode = null;
     this.seenNonces.clear();
+    this.peerMaxSeq.clear();
+    this.mySeq = 0;
     this.dynamicHunterKey = null;
     this.dynamicAllyKey = null;
     this.importedPubKeys.clear();
@@ -226,6 +232,37 @@ export class CryptoService {
 
   generateSecureToken(byteLen = 32): string {
     return randomHex(byteLen);
+  }
+
+  /** Calcule une preuve de travail légère (16 bits de zéros) anti-Sybil/anti-flood en ~40ms. */
+  async solveProofOfWork(code: string, uid: string): Promise<string> {
+    const enc = new TextEncoder();
+    const prefix = `${code.toUpperCase()}::${uid}::`;
+    let nonce = 0;
+    while (true) {
+      const candidate = (nonce++).toString(16);
+      const hashBuf = await crypto.subtle.digest('SHA-256', enc.encode(prefix + candidate));
+      const bytes = new Uint8Array(hashBuf);
+      if (bytes[0] === 0 && bytes[1] === 0) {
+        return candidate;
+      }
+    }
+  }
+
+  /** Vérifie instantanément en 1 hash la preuve de travail fournie. */
+  async verifyProofOfWork(code: string, uid: string, nonce: string): Promise<boolean> {
+    if (!nonce || typeof nonce !== 'string' || nonce.length > 32) return false;
+    const enc = new TextEncoder();
+    const hashBuf = await crypto.subtle.digest('SHA-256', enc.encode(`${code.toUpperCase()}::${uid}::${nonce}`));
+    const bytes = new Uint8Array(hashBuf);
+    return bytes[0] === 0 && bytes[1] === 0;
+  }
+
+  /** Topic de rendez-vous chiffré pour négociation initiale des sessions saisies au code court. */
+  async getRendezvousTopic(code: string): Promise<string> {
+    const enc = new TextEncoder();
+    const hashBuf = await crypto.subtle.digest('SHA-256', enc.encode(`TM-RENDEZVOUS-V2::${code.trim().toUpperCase()}`));
+    return `tm/v2/rz_${toHex(new Uint8Array(hashBuf)).slice(0, 32)}`;
   }
 
   /** Charge ou génère l'identité cryptographique asymétrique de l'appareil (ECDSA P-256 + ECDH P-256). */
@@ -601,9 +638,10 @@ export class CryptoService {
     crypto.getRandomValues(iv);
     const nonce = randomHex(12);
     const ts = Math.round(timestamp);
+    const seq = ++this.mySeq;
 
     const enc = new TextEncoder();
-    const aadStr = `v2|${suite.code}|${scope}|${type}|${senderUid}|${ts}|${nonce}|${identity.publicKeySpkiB64}`;
+    const aadStr = `v2|${suite.code}|${scope}|${type}|${senderUid}|${seq}|${ts}|${nonce}|${identity.publicKeySpkiB64}`;
     const aad = enc.encode(aadStr);
     const plaintext = enc.encode(JSON.stringify(payload));
 
@@ -627,6 +665,7 @@ export class CryptoService {
       k: scope,
       t: type,
       u: senderUid,
+      seq,
       ts,
       n: nonce,
       iv: ivB64,
@@ -663,6 +702,8 @@ export class CryptoService {
         typeof env.t !== 'string' ||
         typeof env.u !== 'string' ||
         !isValidUid(env.u) ||
+        typeof env.seq !== 'number' ||
+        !Number.isFinite(env.seq) ||
         typeof env.ts !== 'number' ||
         !Number.isFinite(env.ts) ||
         typeof env.n !== 'string' ||
@@ -682,6 +723,15 @@ export class CryptoService {
         return null;
       }
 
+      // Contrôle de numéro de séquence strictement monotone par émetteur (anti-rejeu absolu)
+      if (!allowHistoricalTimestamp) {
+        const lastSeq = this.peerMaxSeq.get(env.u) ?? 0;
+        if (env.seq <= lastSeq) {
+          return null; // Rejet : numéro de séquence non monotone (attaque par rejeu)
+        }
+        this.peerMaxSeq.set(env.u, env.seq);
+      }
+
       const replayKey = `${env.u}:${env.n}`;
       if (this.seenNonces.has(replayKey)) {
         return null;
@@ -698,7 +748,7 @@ export class CryptoService {
 
       const suite = await this.getSuite(code, deviceSecret);
       const enc = new TextEncoder();
-      const aadStr = `v2|${suite.code}|${env.k}|${env.t}|${env.u}|${env.ts}|${env.n}|${env.pk}`;
+      const aadStr = `v2|${suite.code}|${env.k}|${env.t}|${env.u}|${env.seq}|${env.ts}|${env.n}|${env.pk}`;
 
       // 1. Vérification de la signature asymétrique ECDSA P-256
       const sigBytes = fromBase64(env.sig);

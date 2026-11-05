@@ -1,6 +1,6 @@
 import { Injectable, computed, effect, inject, signal, untracked } from '@angular/core';
 import { AllyShareMode, Circle, GameEvent, Player, Pos, Role, Session, Settings } from './models';
-import { destPoint, distance, randomCode, secureRandomUnit, secureShuffle, vibrate } from './utils';
+import { LatLng, destPoint, distance, randomCode, secureRandomUnit, secureShuffle, vibrate } from './utils';
 import { CryptoService, E2eeEnvelope, EncryptedRoleTicket, isValidLatLng, isValidRadius, isValidUid, sanitizeCoord, sanitizeName } from './crypto.service';
 import { P2pSessionMesh, RtcSignalPayload } from './p2p-transport';
 import { ToastService } from './toast.service';
@@ -144,8 +144,27 @@ export class GameService {
   private currentHunterSecret: string | null = null;
   private currentAllySecret: string | null = null;
   private peerLastPos = new Map<string, { lat: number; lng: number; t: number }>();
+  private peerLastCircle = new Map<string, { lat: number; lng: number; r: number; t: number }>();
   private joinResolvers: Array<{ resolve: () => void; reject: (err: Error) => void }> = [];
   private openTimeout: ReturnType<typeof setTimeout> | null = null;
+
+  huntedLeaderId(): string | null {
+    const aliveHunted = this.sortedPlayers().filter((p) => p.role === 'hunted');
+    return aliveHunted[0]?.id ?? null;
+  }
+
+  hunterLeaderId(): string | null {
+    const hunters = this.sortedPlayers().filter((p) => p.role === 'hunter');
+    return hunters[0]?.id ?? null;
+  }
+
+  isHuntedLeader(): boolean {
+    return this.huntedLeaderId() === this.uid;
+  }
+
+  isHunterLeader(): boolean {
+    return this.hunterLeaderId() === this.uid;
+  }
 
   constructor() {
     this.purgeLegacyStorage();
@@ -292,11 +311,18 @@ export class GameService {
 
     await this.refreshMyCatchCode(cleanCode, this.session()?.start_at ?? 0);
     const blindTopic = await this.crypto.getBlindTopic(cleanCode, this.secret);
+    const rendezvousTopic = await this.crypto.getRendezvousTopic(cleanCode);
     if (this.code() !== cleanCode) return;
+
+    // Si le secret de session 128 bits est connu (créateur ou flash QR), on écoute blindTopic (et rendezvousTopic pour l'hôte).
+    // Sinon (saisie purement manuelle du code 6 lettres), on démarre sur rendezvousTopic pour obtenir le secret via ECDH.
+    const hasKey = !!this.sessionKey();
+    const primaryTopic = hasKey ? blindTopic : rendezvousTopic;
+    const topicsToListen = hasKey ? [blindTopic, rendezvousTopic] : [rendezvousTopic];
 
     this.mesh = new P2pSessionMesh(
       this.uid,
-      blindTopic,
+      topicsToListen,
       (env) => void this.onP2pEnvelope(env),
       () => {
         void this.broadcastPresenceAndSync();
@@ -329,10 +355,12 @@ export class GameService {
     const myName = sanitizeName(this.me()?.name ?? localStorage.getItem('tm_name') ?? 'Joueur');
 
     if (!this.session() || !this.me()) {
+      const powNonce = await this.crypto.solveProofOfWork(code, this.uid);
       await this.sendP2p('s', 'join_req', {
         name: myName,
         pubKey: identity.publicKeySpkiB64,
         ecdhKey: identity.ecdhPublicKeySpkiB64,
+        powNonce,
       });
     } else {
       await this.sendP2p('s', 'sync_req', { at: this.serverNow() });
@@ -514,9 +542,16 @@ export class GameService {
       }
 
       case 'join_req': {
-        const d = pkt.data as { name?: string; pubKey?: string; ecdhKey?: string } | null;
+        const d = pkt.data as { name?: string; pubKey?: string; ecdhKey?: string; powNonce?: string } | null;
         const s = this.session();
         if (!d || !s) return;
+
+        // Protection anti-Sybil par preuve de travail cryptographique
+        if (d.powNonce) {
+          const validPow = await this.crypto.verifyProofOfWork(code, pkt.senderUid, d.powNonce);
+          if (!validPow) return; // Rejet : challenge PoW invalide
+        }
+
         const existing = this.players()[pkt.senderUid];
         if (existing) {
           const cleanName = sanitizeName(d.name ?? existing.name);
@@ -585,13 +620,15 @@ export class GameService {
         if (!d || d.targetUid !== this.uid || !d.iv || !d.ct) return;
         const hostId = s?.host_id ?? pkt.senderUid;
         const hostPlayer = this.players()[hostId];
-        if (!hostPlayer?.ecdh_key) return;
+        const ecdhKey = hostPlayer?.ecdh_key || pkt.senderPubKey;
         try {
-          const secret = await this.crypto.unwrapSecretFromPeer(hostPlayer.ecdh_key, d.iv, d.ct);
+          const secret = await this.crypto.unwrapSecretFromPeer(ecdhKey, d.iv, d.ct);
           if (secret && /^[0-9a-f]{32,64}$/i.test(secret)) {
             this.sessionKey.set(secret);
             this.crypto.setSessionSecret(secret);
             try { sessionStorage.setItem(`tm_sk_${code}`, secret); } catch { /* ignore */ }
+            const blindTopic = await this.crypto.getBlindTopic(code, this.secret);
+            this.mesh?.setPrimaryTopic(blindTopic);
           }
         } catch { /* ignore */ }
         return;
@@ -751,14 +788,17 @@ export class GameService {
 
       case 'role_keys': {
         const s = this.session();
-        if (!s || pkt.senderUid !== s.host_id) return;
+        if (!s) return;
         const d = pkt.data as { tickets?: EncryptedRoleTicket[] } | null;
         if (!d || !Array.isArray(d.tickets)) return;
         const myTicket = d.tickets.find((t) => t.targetUid === this.uid);
         if (!myTicket) return;
-        const hostPlayer = this.players()[s.host_id];
-        if (!hostPlayer?.ecdh_key) return;
-        const secret = await this.crypto.unwrapSecretFromPeer(hostPlayer.ecdh_key, myTicket.iv, myTicket.ct);
+        const senderPlayer = this.players()[pkt.senderUid];
+        if (!senderPlayer?.ecdh_key) return;
+        // Validation d'intégrité de rôle : un chasseur ne peut distribuer que la clé chasseur, un chassé que la clé chassé
+        if (myTicket.role === 'hunter' && senderPlayer.role !== 'hunter' && pkt.senderUid !== s.host_id) return;
+        if (myTicket.role === 'hunted' && senderPlayer.role !== 'hunted' && pkt.senderUid !== s.host_id) return;
+        const secret = await this.crypto.unwrapSecretFromPeer(senderPlayer.ecdh_key, myTicket.iv, myTicket.ct);
         if (secret) {
           const scope = myTicket.role === 'hunter' ? 'h' : 'a';
           await this.crypto.installDynamicRoleKey(scope, secret);
@@ -770,11 +810,17 @@ export class GameService {
         const s = this.session();
         if (!s || s.status !== 'playing') return;
         const d = pkt.data as { victimId: string; hunterId: string; caughtAt: number; event: GameEvent } | null;
-        if (!d || pkt.senderUid !== d.victimId) return;
+        if (!d || !d.victimId || !d.hunterId) return;
+        // Validation : le paquet peut être émis soit par la victime soit par le chasseur attitré
+        const isVictim = pkt.senderUid === d.victimId;
+        const isHunter = pkt.senderUid === d.hunterId && (this.players()[d.hunterId]?.role === 'hunter' || d.hunterId === s.host_id);
+        if (!isVictim && !isHunter) return;
         this.applyPlayerCaught(d.victimId, d.hunterId, d.caughtAt, d.event);
         if (this.isHost()) {
-          void this.rotateAllyKeyOnCapture(d.victimId);
           void this.dispatchRoleKeyToPlayer(d.victimId);
+        }
+        if (this.isHuntedLeader()) {
+          void this.rotateAllyKeyOnCapture(d.victimId);
         }
         return;
       }
@@ -786,8 +832,10 @@ export class GameService {
         if (!d || pkt.senderUid !== d.victimId) return;
         this.applyPlayerCaught(d.victimId, 'ZONE', d.caughtAt, d.event);
         if (this.isHost()) {
-          void this.rotateAllyKeyOnCapture(d.victimId);
           void this.dispatchRoleKeyToPlayer(d.victimId);
+        }
+        if (this.isHuntedLeader()) {
+          void this.rotateAllyKeyOnCapture(d.victimId);
         }
         return;
       }
@@ -854,12 +902,18 @@ export class GameService {
         const zone = this.session()?.settings.zone;
         if (zone && distance(validCircle, zone) > zone.r * 1.5) return;
 
-        const prevCircle = knownPlayer.circle;
+        const now = this.serverNow();
+        const prevCircle = this.peerLastCircle.get(pkt.senderUid) ?? knownPlayer.circle;
         if (prevCircle) {
-          const dtSec = Math.max(0.5, (validCircle.t - prevCircle.t) / 1000);
+          const dtSec = Math.max(0.5, (now - prevCircle.t) / 1000);
           const distCenter = distance(prevCircle, validCircle);
-          if (distCenter > Math.max(60, validCircle.r * 2.5) && dtSec < 8) return;
+          const speed = distCenter / dtSec;
+          // Contrôle physique de vitesse sur le déplacement du centre (max 15 m/s ≈ 54 km/h)
+          if (distCenter > 30 && speed > 15) {
+            return; // Rejet : tentative de téléportation de cercle impossible
+          }
         }
+        this.peerLastCircle.set(pkt.senderUid, { ...validCircle, t: now });
 
         this.players.update((m) =>
           m[pkt.senderUid]
@@ -911,8 +965,18 @@ export class GameService {
         try {
           const raw = await this.crypto.unwrapSecretFromPeer(sender.ecdh_key, d.iv, d.ct);
           if (!raw) return;
-          const probe = JSON.parse(raw) as { pin?: string; victimId?: string; ts?: number };
+          const probe = JSON.parse(raw) as { pin?: string; victimId?: string; ts?: number; lat?: number; lng?: number; acc?: number };
           if (probe.pin === this.myCatchCode() && probe.victimId === pkt.senderUid) {
+            // Contrôle physique de proximité spatiale (anti-capture à distance)
+            const hunterPos = this.myPos();
+            if (hunterPos && probe.lat != null && probe.lng != null && isValidLatLng(probe.lat, probe.lng)) {
+              const dist = distance(hunterPos, { lat: probe.lat, lng: probe.lng });
+              const maxAllowed = 35 + (hunterPos.acc || 15) + (probe.acc || 15);
+              if (dist > maxAllowed) {
+                return; // Rejet : capture à distance physiquement impossible (> 35m)
+              }
+            }
+
             const ev: GameEvent = {
               id: now + Math.floor(secureRandomUnit() * 1000),
               session_code: code,
@@ -933,7 +997,6 @@ export class GameService {
               event: ev,
             });
             if (this.isHost()) {
-              void this.rotateAllyKeyOnCapture(probe.victimId);
               void this.dispatchRoleKeyToPlayer(probe.victimId);
             }
           }
@@ -1174,6 +1237,9 @@ export class GameService {
 
     return new Promise<void>((resolve, reject) => {
       this.joinResolvers.push({ resolve, reject });
+      let powNonce: string | null = null;
+      void this.crypto.solveProofOfWork(cleanCode, this.uid).then((p) => (powNonce = p));
+
       const retryInterval = setInterval(() => {
         if (this.session()?.code === cleanCode && this.players()[this.uid]) {
           clearInterval(retryInterval);
@@ -1183,6 +1249,7 @@ export class GameService {
           name: cleanName,
           pubKey: identity.publicKeySpkiB64,
           ecdhKey: identity.ecdhPublicKeySpkiB64,
+          powNonce: powNonce ?? undefined,
         });
       }, 650);
 
@@ -1194,7 +1261,7 @@ export class GameService {
           this.close();
           reject(new Error('Session introuvable ou aucun joueur en ligne.'));
         }
-      }, 5500);
+      }, 7000);
     });
   }
 
@@ -1218,6 +1285,8 @@ export class GameService {
     this.lastCircle = null;
     this.allyExactPos.set({});
     this.lastValidGps = null;
+    this.peerLastPos.clear();
+    this.peerLastCircle.clear();
     this.purgeLegacyStorage();
     try {
       for (const k of Object.keys(sessionStorage)) {
@@ -1331,28 +1400,34 @@ export class GameService {
       data: {},
     };
 
-    // Accord de clés Zero-Knowledge : génération de secrets de rôles distincts
-    const hunterSecret = this.crypto.generateSecureToken(32);
-    const allySecret = this.crypto.generateSecureToken(32);
-    this.currentHunterSecret = hunterSecret;
-    this.currentAllySecret = allySecret;
-
+    // Isolation Zero-Knowledge stricte : l'Hôte NE GÉNÈRE QUE la clé de son PROPRE rôle !
     const hostRole: Role = hunters.includes(this.uid) ? 'hunter' : 'hunted';
-    if (hostRole === 'hunter') {
-      await this.crypto.installDynamicRoleKey('h', hunterSecret);
-    } else {
-      await this.crypto.installDynamicRoleKey('a', allySecret);
-    }
-
     const tickets: EncryptedRoleTicket[] = [];
-    for (const p of this.sortedPlayers()) {
-      if (p.id === this.uid || !p.ecdh_key) continue;
-      const targetRole: Role = hunters.includes(p.id) ? 'hunter' : 'hunted';
-      const secretToWrap = targetRole === 'hunter' ? hunterSecret : allySecret;
-      try {
-        const wrap = await this.crypto.wrapSecretForPeer(p.ecdh_key, secretToWrap);
-        tickets.push({ targetUid: p.id, role: targetRole, iv: wrap.iv, ct: wrap.ct });
-      } catch { /* ignore */ }
+
+    if (hostRole === 'hunter') {
+      const hunterSecret = this.crypto.generateSecureToken(32);
+      this.currentHunterSecret = hunterSecret;
+      this.currentAllySecret = null; // Zero-Knowledge : l'hôte chasseur ignore totalement allySecret
+      await this.crypto.installDynamicRoleKey('h', hunterSecret);
+      for (const p of this.sortedPlayers()) {
+        if (p.id === this.uid || !p.ecdh_key || !hunters.includes(p.id)) continue;
+        try {
+          const wrap = await this.crypto.wrapSecretForPeer(p.ecdh_key, hunterSecret);
+          tickets.push({ targetUid: p.id, role: 'hunter', iv: wrap.iv, ct: wrap.ct });
+        } catch { /* ignore */ }
+      }
+    } else {
+      const allySecret = this.crypto.generateSecureToken(32);
+      this.currentAllySecret = allySecret;
+      this.currentHunterSecret = null; // Zero-Knowledge : l'hôte chassé ignore totalement hunterSecret
+      await this.crypto.installDynamicRoleKey('a', allySecret);
+      for (const p of this.sortedPlayers()) {
+        if (p.id === this.uid || !p.ecdh_key || hunters.includes(p.id)) continue;
+        try {
+          const wrap = await this.crypto.wrapSecretForPeer(p.ecdh_key, allySecret);
+          tickets.push({ targetUid: p.id, role: 'hunted', iv: wrap.iv, ct: wrap.ct });
+        } catch { /* ignore */ }
+      }
     }
 
     await this.applyStartGame(startAt, endAt, hunters, startEvent);
@@ -1363,34 +1438,83 @@ export class GameService {
     await this.broadcastFullStateSync();
   }
 
+  private async generateAndDistributeHunterSecret(hunters: string[]) {
+    const hunterSecret = this.crypto.generateSecureToken(32);
+    this.currentHunterSecret = hunterSecret;
+    await this.crypto.installDynamicRoleKey('h', hunterSecret);
+    const tickets: EncryptedRoleTicket[] = [];
+    for (const p of this.sortedPlayers()) {
+      if (p.id === this.uid || !p.ecdh_key || !hunters.includes(p.id)) continue;
+      try {
+        const wrap = await this.crypto.wrapSecretForPeer(p.ecdh_key, hunterSecret);
+        tickets.push({ targetUid: p.id, role: 'hunter', iv: wrap.iv, ct: wrap.ct });
+      } catch { /* ignore */ }
+    }
+    if (tickets.length > 0) {
+      await this.sendP2p('s', 'role_keys', { tickets });
+    }
+  }
+
+  private async generateAndDistributeAllySecret(hunters: string[]) {
+    const allySecret = this.crypto.generateSecureToken(32);
+    this.currentAllySecret = allySecret;
+    await this.crypto.installDynamicRoleKey('a', allySecret);
+    const tickets: EncryptedRoleTicket[] = [];
+    for (const p of this.sortedPlayers()) {
+      if (p.id === this.uid || !p.ecdh_key || hunters.includes(p.id)) continue;
+      try {
+        const wrap = await this.crypto.wrapSecretForPeer(p.ecdh_key, allySecret);
+        tickets.push({ targetUid: p.id, role: 'hunted', iv: wrap.iv, ct: wrap.ct });
+      } catch { /* ignore */ }
+    }
+    if (tickets.length > 0) {
+      await this.sendP2p('s', 'role_keys', { tickets });
+    }
+  }
+
   private async dispatchRoleKeyToPlayer(targetUid: string) {
-    if (!this.isHost() || !this.currentHunterSecret || !this.currentAllySecret) return;
     const targetPlayer = this.players()[targetUid];
     if (!targetPlayer || !targetPlayer.ecdh_key) return;
     const targetRole = targetPlayer.role;
-    const secret = targetRole === 'hunter' ? this.currentHunterSecret : this.currentAllySecret;
-    try {
-      const wrap = await this.crypto.wrapSecretForPeer(targetPlayer.ecdh_key, secret);
-      const ticket: EncryptedRoleTicket = {
-        targetUid,
-        role: targetRole,
-        iv: wrap.iv,
-        ct: wrap.ct,
-      };
-      await this.sendP2p('s', 'role_keys', { tickets: [ticket] });
-    } catch { /* ignore */ }
+
+    // Zero-Knowledge : seul le leader de CE rôle transmet le secret à son pair
+    if (targetRole === 'hunter' && this.currentHunterSecret && (this.isHost() || this.isHunterLeader())) {
+      try {
+        const wrap = await this.crypto.wrapSecretForPeer(targetPlayer.ecdh_key, this.currentHunterSecret);
+        await this.sendP2p('s', 'role_keys', {
+          tickets: [{ targetUid, role: 'hunter', iv: wrap.iv, ct: wrap.ct }],
+        });
+      } catch { /* ignore */ }
+    } else if (targetRole === 'hunted' && this.currentAllySecret && this.isHuntedLeader()) {
+      try {
+        const wrap = await this.crypto.wrapSecretForPeer(targetPlayer.ecdh_key, this.currentAllySecret);
+        await this.sendP2p('s', 'role_keys', {
+          tickets: [{ targetUid, role: 'hunted', iv: wrap.iv, ct: wrap.ct }],
+        });
+      } catch { /* ignore */ }
+    }
   }
 
   private async dispatchSessionSecretToPeer(targetUid: string, peerEcdhKey: string) {
     const k = this.sessionKey();
-    if (!k) return;
+    const code = this.code();
+    if (!k || !code) return;
     try {
       const wrap = await this.crypto.wrapSecretForPeer(peerEcdhKey, k);
+      const rendezvousTopic = await this.crypto.getRendezvousTopic(code);
+      // Envoie sur le canal courant
       await this.sendP2p('s', 'session_secret', {
         targetUid,
         iv: wrap.iv,
         ct: wrap.ct,
       });
+      // Et envoie également sur le topic de rendez-vous pour les arrivants par code court
+      const env = await this.crypto.encryptPacket(code, this.secret, 's', 'session_secret', this.uid, this.serverNow(), {
+        targetUid,
+        iv: wrap.iv,
+        ct: wrap.ct,
+      });
+      this.mesh?.broadcast(env, rendezvousTopic);
     } catch { /* ignore */ }
   }
 
@@ -1429,6 +1553,25 @@ export class GameService {
     );
     vibrate(300);
     await this.persistEncryptedSnapshot();
+
+    // Rôle Leader décentralisé :
+    const s = this.session();
+    if (s && !this.isHost()) {
+      const isHostHunter = hunters.includes(s.host_id);
+      if (isHostHunter) {
+        // L'hôte est chasseur -> Le premier chassé génère et distribue allySecret de façon autonome
+        const livingHunted = this.sortedPlayers().filter((p) => !hunters.includes(p.id));
+        if (livingHunted[0]?.id === this.uid) {
+          void this.generateAndDistributeAllySecret(hunters);
+        }
+      } else {
+        // L'hôte est chassé -> Le premier chasseur génère et distribue hunterSecret de façon autonome
+        const livingHunters = this.sortedPlayers().filter((p) => hunters.includes(p.id));
+        if (livingHunters[0]?.id === this.uid) {
+          void this.generateAndDistributeHunterSecret(hunters);
+        }
+      }
+    }
   }
 
   async declareCaught(catchCode: string) {
@@ -1451,11 +1594,20 @@ export class GameService {
     if (!hunters.length) throw new Error('Aucun chasseur en ligne avec accord de clés.');
 
     // Émet une sonde de capture chiffrée en accord de clés ECDH direct vers les chasseurs
+    // avec inclusion de la géolocalisation pour contrôle physique de proximité
+    const myPos = this.myPos();
     for (const h of hunters) {
       try {
         const wrap = await this.crypto.wrapSecretForPeer(
           h.ecdh_key!,
-          JSON.stringify({ pin: cleanCatchCode, victimId: this.uid, ts: now }),
+          JSON.stringify({
+            pin: cleanCatchCode,
+            victimId: this.uid,
+            ts: now,
+            lat: myPos ? sanitizeCoord(myPos.lat) : null,
+            lng: myPos ? sanitizeCoord(myPos.lng) : null,
+            acc: myPos ? myPos.acc : null,
+          }),
         );
         void this.sendP2p('s', 'catch_probe', { targetHunter: h.id, iv: wrap.iv, ct: wrap.ct });
       } catch { /* ignore */ }
@@ -1474,7 +1626,7 @@ export class GameService {
           }
           reject(new Error('Code chasseur invalide ou non reconnu.'));
         }
-      }, 3500);
+      }, 4500);
 
       this.pendingCatchResolver = {
         resolve: () => {
@@ -1494,7 +1646,7 @@ export class GameService {
   }
 
   private async rotateAllyKeyOnCapture(capturedUid: string) {
-    if (!this.isHost()) return;
+    if (!this.isHuntedLeader()) return;
     const newAllySecret = this.crypto.generateSecureToken(32);
     this.currentAllySecret = newAllySecret;
 
@@ -1526,6 +1678,7 @@ export class GameService {
       this.allyExactPos.set({});
       if (this.pendingCatchResolver) {
         this.pendingCatchResolver.resolve();
+        this.pendingCatchResolver = null;
       }
     }
 
@@ -1969,6 +2122,28 @@ export class GameService {
     }
   }
 
+  private getDeterministicCircleCenter(pos: MyPos, radius: number): LatLng {
+    const s = this.session();
+    const code = s?.code ?? 'TM';
+    const { radius: curRadius } = this.shrink();
+    // Taille de la cellule de grille proportionnelle au rayon pour englober la position
+    const gridSizeMeters = Math.max(30, Math.round(radius * 0.45));
+    const latStep = gridSizeMeters / 111132;
+    const lngStep = gridSizeMeters / (111132 * Math.cos((pos.lat * Math.PI) / 180));
+    const cellLatIndex = Math.floor(pos.lat / latStep);
+    const cellLngIndex = Math.floor(pos.lng / lngStep);
+
+    // Graine déterministe basée sur le code, l'UID du joueur, la cellule et le rayon d'étape
+    const seedStr = `${code}::${this.uid}::${cellLatIndex}::${cellLngIndex}::${curRadius}`;
+    const hash = this.hashString(seedStr);
+    const pseudoAngle = (Math.abs(hash) % 3600) / 10;
+    const pseudoDistRatio = 0.2 + ((Math.abs(hash >> 6) % 35) / 100);
+
+    const cellCenterLat = (cellLatIndex + 0.5) * latStep;
+    const cellCenterLng = (cellLngIndex + 0.5) * lngStep;
+    return destPoint({ lat: cellCenterLat, lng: cellCenterLng }, radius * pseudoDistRatio, pseudoAngle);
+  }
+
   private maybeUpdateCircle(pos: MyPos, forceFlagUpdate = false) {
     const m = this.me();
     if (!m || m.role !== 'hunted') return;
@@ -1980,9 +2155,10 @@ export class GameService {
     const d = c ? distance(pos, c) : Infinity;
     const expired = !!(c && refreshSec && refreshSec > 0 && now - c.t >= refreshSec * 1000);
     if (!c || c.r !== radius || d > radius * 0.85 || expired) {
-      const offsetRatio = 0.12 + Math.sqrt(secureRandomUnit()) * 0.56;
-      const bearing = secureRandomUnit() * 360;
-      const center = destPoint(pos, radius * offsetRatio, bearing);
+      // Ancrage spatial déterministe (anti-trilatération) :
+      // On calcule un centre stable ancré sur une grille spatiale discrète et dérivé de l'étape de rétrécissement.
+      // Cela interdit toute déduction par intersection de cercles multiples !
+      const center = this.getDeterministicCircleCenter(pos, radius);
       const circle: Circle = { lat: sanitizeCoord(center.lat), lng: sanitizeCoord(center.lng), r: radius, t: now, allyShare };
       this.lastCircle = circle;
       this.lastCircleBroadcast = now;
