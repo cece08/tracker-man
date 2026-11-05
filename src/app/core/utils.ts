@@ -1,6 +1,7 @@
 // Utilitaires géographiques, formatage et primitives CSPRNG (Web Crypto API)
 
 export interface LatLng { lat: number; lng: number; }
+export { sanitizeName } from './crypto.service';
 
 const R_EARTH = 6371000;
 const toRad = (d: number) => (d * Math.PI) / 180;

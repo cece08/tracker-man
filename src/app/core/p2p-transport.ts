@@ -96,8 +96,9 @@ export class P2pSessionMesh {
   private activeTopics: Set<string> = new Set();
   private primaryTopic: string;
 
-  // Protection anti-DDoS CPU (filtrage de taux de paquets avant calculs cryptographiques)
-  private peerPacketRate = new Map<string, { count: number; windowStart: number }>();
+  // Protection anti-flood transport brut (limitation globale par socket sans confiance en parsed.u)
+  private transportFrameCount = 0;
+  private transportWindowStart = Date.now();
 
   // Maillage WebRTC P2P direct (uid -> RTCPeerConnection / RTCDataChannel)
   private peers = new Map<string, RTCPeerConnection>();
@@ -239,17 +240,16 @@ export class P2pSessionMesh {
     try {
       const parsed = JSON.parse(raw) as E2eeEnvelope;
       if (parsed && parsed.v === 2 && parsed.u && parsed.u !== this.myUid) {
-        // Anti-DDoS CPU : limitation stricte de fréquence par UID émetteur avant toute opération WebCrypto
+        // Anti-DDoS CPU transport brut : limitation globale de débit par socket sans se fier à parsed.u [MAJ-01]
+        // Le rate-limiting par pair individuel est appliqué UNIQUEMENT après vérification ECDSA P-256.
         const now = Date.now();
-        const rate = this.peerPacketRate.get(parsed.u) ?? { count: 0, windowStart: now };
-        if (now - rate.windowStart > 1000) {
-          rate.count = 0;
-          rate.windowStart = now;
+        if (now - this.transportWindowStart > 1000) {
+          this.transportFrameCount = 0;
+          this.transportWindowStart = now;
         }
-        rate.count++;
-        this.peerPacketRate.set(parsed.u, rate);
-        if (rate.count > 12) {
-          return; // Dépassement de quota de messages (anti-flood CPU)
+        this.transportFrameCount++;
+        if (this.transportFrameCount > 60) {
+          return; // Dépassement de quota de trames transport brut
         }
         this.onEnvelope(parsed);
       }
@@ -310,6 +310,12 @@ export class P2pSessionMesh {
 
       pc.onicecandidate = (ev) => {
         if (ev.candidate && !this.closed) {
+          const candStr = ev.candidate.candidate;
+          // Protection RFC 8828 : bloquer la divulgation d'adresses IP privées du réseau local LAN [MAJ-05]
+          const isPrivateLan = /\b(192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)\b/.test(candStr);
+          if (candStr && candStr.includes('typ host') && isPrivateLan) {
+            return;
+          }
           this.sendRtcSignalEnvelope({
             targetUid: peerUid,
             ice: ev.candidate.toJSON(),

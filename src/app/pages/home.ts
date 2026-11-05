@@ -70,10 +70,13 @@ export class HomePage {
   private toast = inject(ToastService);
   readonly pwa = inject(PwaService);
 
-  readonly name = signal(localStorage.getItem('tm_name') ?? '');
+  readonly name = signal(sanitizeName(localStorage.getItem('tm_name') ?? ''));
   readonly code = signal('');
   readonly fromQr = signal(false);
-  readonly savedCode = signal(localStorage.getItem('tm_code'));
+  readonly savedCode = signal((() => {
+    const c = localStorage.getItem('tm_code');
+    return c && /^[A-Z0-9]{6}$/.test(c.trim().toUpperCase()) ? c.trim().toUpperCase() : null;
+  })());
   readonly busy = signal(false);
 
   constructor() {

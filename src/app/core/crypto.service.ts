@@ -30,7 +30,8 @@ export interface E2eeEnvelope {
   k: KeyScope;
   t: PacketType;
   u: string;   // sender uid
-  seq: number; // monotonic sequence counter (anti-replay)
+  seq: number; // sequence counter
+  ep?: number; // epoch instance ID (résilience au rechargement de page & fenêtre glissante RFC 4303)
   ts: number;  // timestamp ms
   n: string;   // 96-bit CSPRNG nonce (hex)
   iv: string;  // 96-bit CSPRNG IV (base64)
@@ -44,6 +45,7 @@ interface SessionKeySuite {
   blindTopic: string;
   sessionKey: CryptoKey;
   localKey: CryptoKey;
+  baseKey: CryptoKey;
 }
 
 export interface DeviceIdentity {
@@ -194,7 +196,8 @@ export class CryptoService {
   private importedEcdhKeys = new Map<string, CryptoKey>();
 
   private mySeq = 0;
-  private peerMaxSeq = new Map<string, number>();
+  private myEpoch = Date.now();
+  private peerReplayWindows = new Map<string, { epoch: number; maxSeq: number; window: bigint }>();
 
   private sessionSecret: string | null = null;
 
@@ -221,8 +224,9 @@ export class CryptoService {
     this.suitePromise = null;
     this.currentCode = null;
     this.seenNonces.clear();
-    this.peerMaxSeq.clear();
+    this.peerReplayWindows.clear();
     this.mySeq = 0;
+    this.myEpoch = Date.now();
     this.dynamicHunterKey = null;
     this.dynamicAllyKey = null;
     this.importedPubKeys.clear();
@@ -258,11 +262,43 @@ export class CryptoService {
     return bytes[0] === 0 && bytes[1] === 0;
   }
 
-  /** Topic de rendez-vous chiffré pour négociation initiale des sessions saisies au code court. */
-  async getRendezvousTopic(code: string): Promise<string> {
+  /** Topic de rendez-vous chiffré pour négociation initiale des sessions. */
+  async getRendezvousTopic(code: string, sharedEntropyHex?: string | null): Promise<string> {
+    const cleanCode = code.trim().toUpperCase();
     const enc = new TextEncoder();
-    const hashBuf = await crypto.subtle.digest('SHA-256', enc.encode(`TM-RENDEZVOUS-V2::${code.trim().toUpperCase()}`));
-    return `tm/v2/rz_${toHex(new Uint8Array(hashBuf)).slice(0, 32)}`;
+    if (sharedEntropyHex && sharedEntropyHex.length >= 32) {
+      // Pour les sessions par QR Code / lien direct : HMAC-SHA-256 avec 128 bits d'entropie CSPRNG (espace > 10^38)
+      const hmacKey = await crypto.subtle.importKey(
+        'raw',
+        enc.encode(sharedEntropyHex),
+        { name: 'HMAC', hash: 'SHA-256' },
+        false,
+        ['sign'],
+      );
+      const mac = await crypto.subtle.sign('HMAC', hmacKey, enc.encode(`TM-QR-RENDEZVOUS-V3::${cleanCode}`));
+      return `tm/v3/rz_${toHex(new Uint8Array(mac)).slice(0, 32)}`;
+    }
+
+    // Pour les saisies manuelles au code court (6 caractères) :
+    // KDF lourd PBKDF2 (200 000 itérations) interdisant toute inversion GPU temps réel [CRIT-01]
+    const baseKey = await crypto.subtle.importKey(
+      'raw',
+      enc.encode(`TM-PEPPER-V3::${cleanCode}`),
+      'PBKDF2',
+      false,
+      ['deriveBits'],
+    );
+    const bits = await crypto.subtle.deriveBits(
+      {
+        name: 'PBKDF2',
+        salt: enc.encode('TM-GOVSEC-MANUAL-RENDEZVOUS-SALT-2026-IMMUTABLE'),
+        iterations: 200_000,
+        hash: 'SHA-256',
+      },
+      baseKey,
+      256,
+    );
+    return `tm/v3/rz_${toHex(new Uint8Array(bits)).slice(0, 32)}`;
   }
 
   /** Charge ou génère l'identité cryptographique asymétrique de l'appareil (ECDSA P-256 + ECDH P-256). */
@@ -524,10 +560,45 @@ export class CryptoService {
 
   private async deriveSuite(code: string, deviceSecret: string): Promise<SessionKeySuite> {
     const enc = new TextEncoder();
+
+    // 1. Clé de base dérivée uniquement du code court avec 100 000 itérations PBKDF2
+    // Utilisée pour chiffrer de façon hermétique l'échange de négociation ECDH sans interblocage [MAJ-02]
+    const baseEntropy = await crypto.subtle.importKey(
+      'raw',
+      enc.encode(`TM-BASE-V3::${code}`),
+      'PBKDF2',
+      false,
+      ['deriveBits'],
+    );
+    const baseBits = await crypto.subtle.deriveBits(
+      {
+        name: 'PBKDF2',
+        salt: enc.encode(`TM-Base-Salt-v3::${code}`),
+        iterations: 100_000,
+        hash: 'SHA-256',
+      },
+      baseEntropy,
+      256,
+    );
+    const baseHkdfKey = await crypto.subtle.importKey('raw', baseBits, 'HKDF', false, ['deriveKey']);
+    const baseKey = await crypto.subtle.deriveKey(
+      {
+        name: 'HKDF',
+        hash: 'SHA-256',
+        salt: enc.encode(`TM-HKDF-BaseSalt::${code}`),
+        info: enc.encode('scope:rendezvous-base-v3'),
+      },
+      baseHkdfKey,
+      { name: 'AES-GCM', length: 256 },
+      false,
+      ['encrypt', 'decrypt'],
+    );
+
+    // 2. Clé de session complète intégrant le secret 128 bits
     const entropyMaterial = this.sessionSecret
-      ? `TM-E2EE-V2::${code}::${this.sessionSecret}`
-      : `TM-E2EE-V2::${code}`;
-    const baseKey = await crypto.subtle.importKey(
+      ? `TM-E2EE-V3::${code}::${this.sessionSecret}`
+      : `TM-E2EE-V3::${code}`;
+    const baseMasterKey = await crypto.subtle.importKey(
       'raw',
       enc.encode(entropyMaterial),
       'PBKDF2',
@@ -535,8 +606,8 @@ export class CryptoService {
       ['deriveBits'],
     );
     const saltString = this.sessionSecret
-      ? `TrackerMan-GovSec-EU-Salt-v2::${code}::${this.sessionSecret}`
-      : `TrackerMan-GovSec-EU-Salt-v2::${code}`;
+      ? `TrackerMan-GovSec-EU-Salt-v3::${code}::${this.sessionSecret}`
+      : `TrackerMan-GovSec-EU-Salt-v3::${code}`;
     const masterBits = await crypto.subtle.deriveBits(
       {
         name: 'PBKDF2',
@@ -544,7 +615,7 @@ export class CryptoService {
         iterations: PBKDF2_ITERATIONS,
         hash: 'SHA-256',
       },
-      baseKey,
+      baseMasterKey,
       256,
     );
     const hkdfKey = await crypto.subtle.importKey('raw', masterBits, 'HKDF', false, [
@@ -571,16 +642,16 @@ export class CryptoService {
         name: 'HKDF',
         hash: 'SHA-256',
         salt: enc.encode(`TM-BlindTopic-Salt::${code}`),
-        info: enc.encode('scope:blind-routing-topic-v2'),
+        info: enc.encode('scope:blind-routing-topic-v3'),
       },
       hkdfKey,
       256,
     );
-    const blindTopic = `tm/v2/${toHex(new Uint8Array(topicBits)).slice(0, 40)}`;
+    const blindTopic = `tm/v3/${toHex(new Uint8Array(topicBits)).slice(0, 40)}`;
 
     const localBaseKey = await crypto.subtle.importKey(
       'raw',
-      enc.encode(`TM-LOCAL-V2::${deviceSecret}::${code}`),
+      enc.encode(`TM-LOCAL-V3::${deviceSecret}::${code}`),
       'HKDF',
       false,
       ['deriveKey'],
@@ -590,7 +661,7 @@ export class CryptoService {
         name: 'HKDF',
         hash: 'SHA-256',
         salt: enc.encode(`TM-LocalStorage-Salt::${code}`),
-        info: enc.encode('local-ephemeral-track-v2'),
+        info: enc.encode('local-ephemeral-track-v3'),
       },
       localBaseKey,
       { name: 'AES-GCM', length: 256 },
@@ -598,9 +669,9 @@ export class CryptoService {
       ['encrypt', 'decrypt'],
     );
 
-    const sessionKey = await deriveAesKey('scope:session-general-v2');
+    const sessionKey = this.sessionSecret ? await deriveAesKey('scope:session-general-v3') : baseKey;
 
-    return { code, blindTopic, sessionKey, localKey };
+    return { code, blindTopic, sessionKey, localKey, baseKey };
   }
 
   private pickKey(suite: SessionKeySuite, scope: KeyScope): CryptoKey {
@@ -633,15 +704,17 @@ export class CryptoService {
       this.getSuite(code, deviceSecret),
       this.getDeviceIdentity(),
     ]);
-    const key = this.pickKey(suite, scope);
+    const isHandshake = type === 'join_req' || type === 'session_secret';
+    const key = isHandshake ? suite.baseKey : this.pickKey(suite, scope);
     const iv = new Uint8Array(12);
     crypto.getRandomValues(iv);
     const nonce = randomHex(12);
     const ts = Math.round(timestamp);
     const seq = ++this.mySeq;
+    const ep = this.myEpoch;
 
     const enc = new TextEncoder();
-    const aadStr = `v2|${suite.code}|${scope}|${type}|${senderUid}|${seq}|${ts}|${nonce}|${identity.publicKeySpkiB64}`;
+    const aadStr = `v2|${suite.code}|${scope}|${type}|${senderUid}|${seq}|${ep}|${ts}|${nonce}|${identity.publicKeySpkiB64}`;
     const aad = enc.encode(aadStr);
     const plaintext = enc.encode(JSON.stringify(payload));
 
@@ -666,6 +739,7 @@ export class CryptoService {
       t: type,
       u: senderUid,
       seq,
+      ep,
       ts,
       n: nonce,
       iv: ivB64,
@@ -677,7 +751,7 @@ export class CryptoService {
 
   /**
    * Vérifie la signature ECDSA P-256, l'authenticité AES-256-GCM (tag + AAD),
-   * la fraîcheur temporelle et l'absence de rejeu, puis déchiffre le paquet.
+   * la fraîcheur temporelle et l'absence de rejeu (fenêtre glissante RFC 4303), puis déchiffre le paquet.
    */
   async decryptPacket<T>(
     code: string,
@@ -723,13 +797,38 @@ export class CryptoService {
         return null;
       }
 
-      // Contrôle de numéro de séquence strictement monotone par émetteur (anti-rejeu absolu)
+      // Contrôle de numéro de séquence avec fenêtre glissante RFC 4303 / IPsec (anti-rejeu et résilience UDP) [MAJ-03]
+      const ep = env.ep ?? 0;
       if (!allowHistoricalTimestamp) {
-        const lastSeq = this.peerMaxSeq.get(env.u) ?? 0;
-        if (env.seq <= lastSeq) {
-          return null; // Rejet : numéro de séquence non monotone (attaque par rejeu)
+        let replay = this.peerReplayWindows.get(env.u);
+        if (!replay || ep > replay.epoch) {
+          // Nouvel epoch détecté (ex: rechargement de page ou reconnexion)
+          replay = { epoch: ep, maxSeq: env.seq, window: 1n };
+          this.peerReplayWindows.set(env.u, replay);
+        } else if (ep < replay.epoch) {
+          return null; // Epoch antérieur obsolète
+        } else {
+          // Même epoch : vérification via masque glissant 64 paquets
+          const diff = env.seq - replay.maxSeq;
+          if (diff > 0) {
+            if (diff >= 64) {
+              replay.window = 1n;
+            } else {
+              replay.window = (replay.window << BigInt(diff)) | 1n;
+            }
+            replay.maxSeq = env.seq;
+          } else {
+            const absDiff = -diff;
+            if (absDiff >= 64) {
+              return null; // Paquet trop ancien hors de la fenêtre
+            }
+            const mask = 1n << BigInt(absDiff);
+            if ((replay.window & mask) !== 0n) {
+              return null; // Rejeu détecté dans la fenêtre glissante
+            }
+            replay.window |= mask; // Paquet hors-ordre valide accepté
+          }
         }
-        this.peerMaxSeq.set(env.u, env.seq);
       }
 
       const replayKey = `${env.u}:${env.n}`;
@@ -748,7 +847,7 @@ export class CryptoService {
 
       const suite = await this.getSuite(code, deviceSecret);
       const enc = new TextEncoder();
-      const aadStr = `v2|${suite.code}|${env.k}|${env.t}|${env.u}|${env.seq}|${env.ts}|${env.n}|${env.pk}`;
+      const aadStr = `v2|${suite.code}|${env.k}|${env.t}|${env.u}|${env.seq}|${ep}|${env.ts}|${env.n}|${env.pk}`;
 
       // 1. Vérification de la signature asymétrique ECDSA P-256
       const sigBytes = fromBase64(env.sig);
@@ -760,8 +859,9 @@ export class CryptoService {
       );
       if (!sigValid) return null;
 
-      // 2. Déchiffrement authentifié AES-256-GCM (AEAD)
-      const key = this.pickKey(suite, env.k);
+      // 2. Déchiffrement authentifié AES-256-GCM (AEAD) [MAJ-02]
+      const isHandshake = env.t === 'join_req' || env.t === 'session_secret';
+      const key = isHandshake ? suite.baseKey : this.pickKey(suite, env.k);
       const iv = fromBase64(env.iv);
       if (iv.length !== 12) return null;
       const ciphertext = fromBase64(env.ct);
@@ -786,7 +886,34 @@ export class CryptoService {
     }
   }
 
-  /**
+  /** Signe une chaîne arbitraire avec la clé privée ECDSA P-256 de l'appareil (ex: reçu cryptographique de capture [CRIT-03]). */
+  async signPayload(payloadStr: string): Promise<string> {
+    const identity = await this.getDeviceIdentity();
+    const enc = new TextEncoder();
+    const sigBuf = await crypto.subtle.sign(
+      { name: 'ECDSA', hash: 'SHA-256' },
+      identity.privateKey,
+      enc.encode(payloadStr),
+    );
+    return toBase64(new Uint8Array(sigBuf));
+  }
+
+  /** Vérifie une signature ECDSA P-256 sur une chaîne arbitraire avec la clé publique du pair. */
+  async verifySignature(pubKeySpkiB64: string, payloadStr: string, sigB64: string): Promise<boolean> {
+    try {
+      const verifyKey = await this.importVerifyKey(pubKeySpkiB64);
+      if (!verifyKey) return false;
+      const enc = new TextEncoder();
+      return await crypto.subtle.verify(
+        { name: 'ECDSA', hash: 'SHA-256' },
+        verifyKey,
+        fromBase64(sigB64),
+        enc.encode(payloadStr),
+      );
+    } catch {
+      return false;
+    }
+  }  /**
    * Dérive de façon déterministe et privée le code chasseur à 4 chiffres du joueur
    * à partir de son secret local 256 bits, du code de session et du timestamp de début.
    * Ce code ne quitte JAMAIS le téléphone du chasseur.

@@ -5,6 +5,8 @@ import { ToastService } from '../core/toast.service';
 import { DEFAULT_SETTINGS, Settings } from '../core/models';
 import { SettingsEditor } from './settings-editor';
 
+import { sanitizeName } from '../core/utils';
+
 @Component({
   selector: 'app-create',
   imports: [RouterLink, SettingsEditor],
@@ -33,7 +35,7 @@ export class CreatePage {
   readonly busy = signal(false);
 
   async create(settings: Settings) {
-    const name = localStorage.getItem('tm_name');
+    const name = sanitizeName(localStorage.getItem('tm_name') ?? '');
     if (!name) return void this.router.navigate(['/']);
     this.busy.set(true);
     try {

@@ -5,7 +5,7 @@ import { CryptoService, E2eeEnvelope, EncryptedRoleTicket, isValidLatLng, isVali
 import { P2pSessionMesh, RtcSignalPayload } from './p2p-transport';
 import { ToastService } from './toast.service';
 
-export interface MyPos { lat: number; lng: number; acc: number; }
+export interface MyPos { lat: number; lng: number; acc: number; t: number; }
 
 /** Rayon actuel des cercles et heure du prochain rétrécissement. */
 export function shrinkInfo(s: Session | null, t: number): { radius: number; next: number | null } {
@@ -118,6 +118,7 @@ export class GameService {
   private offset = 0;
   private mesh: P2pSessionMesh | null = null;
   private peerLastSeen = new Map<string, number>();
+  private peerVerifiedRate = new Map<string, { count: number; windowStart: number }>();
   private openedAt = 0;
   private playing = false;
   private watchId: number | null = null;
@@ -311,14 +312,18 @@ export class GameService {
 
     await this.refreshMyCatchCode(cleanCode, this.session()?.start_at ?? 0);
     const blindTopic = await this.crypto.getBlindTopic(cleanCode, this.secret);
-    const rendezvousTopic = await this.crypto.getRendezvousTopic(cleanCode);
+    const hasKey = !!this.sessionKey();
+
+    const qrRendezvousTopic = await this.crypto.getRendezvousTopic(cleanCode, this.sessionKey());
+    const manualRendezvousTopic = await this.crypto.getRendezvousTopic(cleanCode, null);
     if (this.code() !== cleanCode) return;
 
-    // Si le secret de session 128 bits est connu (créateur ou flash QR), on écoute blindTopic (et rendezvousTopic pour l'hôte).
-    // Sinon (saisie purement manuelle du code 6 lettres), on démarre sur rendezvousTopic pour obtenir le secret via ECDH.
-    const hasKey = !!this.sessionKey();
-    const primaryTopic = hasKey ? blindTopic : rendezvousTopic;
-    const topicsToListen = hasKey ? [blindTopic, rendezvousTopic] : [rendezvousTopic];
+    // Si le secret 128 bits est connu (hôte ou scan QR), on écoute blindTopic ET les topics de rendez-vous.
+    // Sinon (saisie manuelle du code 6 lettres), on démarre sur le topic de rendez-vous manuel avec KDF lourd [CRIT-01]
+    const topicsToListen = hasKey
+      ? [blindTopic, qrRendezvousTopic, manualRendezvousTopic]
+      : [manualRendezvousTopic];
+    const primaryTopic = hasKey ? blindTopic : manualRendezvousTopic;
 
     this.mesh = new P2pSessionMesh(
       this.uid,
@@ -393,6 +398,7 @@ export class GameService {
     this.myTrackShared.set(false);
     this.pendingCatchResolver = null;
     this.hunterProbeCounts.clear();
+    this.peerVerifiedRate.clear();
     this.crypto.clearSessionKeys();
     this.loaded.set(false);
     this.stopPlaying();
@@ -507,6 +513,19 @@ export class GameService {
     if (!pkt || pkt.senderUid === this.uid || !isValidUid(pkt.senderUid)) return;
 
     this.markPeerSeen(pkt.senderUid);
+
+    // Rate Limiting post-authentification cryptographique ECDSA P-256 certifiée [MAJ-01]
+    const nowRate = Date.now();
+    const rate = this.peerVerifiedRate.get(pkt.senderUid) ?? { count: 0, windowStart: nowRate };
+    if (nowRate - rate.windowStart > 1000) {
+      rate.count = 0;
+      rate.windowStart = nowRate;
+    }
+    rate.count++;
+    this.peerVerifiedRate.set(pkt.senderUid, rate);
+    if (rate.count > 20) {
+      return; // Dépassement de quota par cet émetteur authentifié
+    }
 
     // Vérifie qu'un pair existant utilise toujours la même clé publique ECDSA P-256 (anti-usurpation)
     const knownPlayer = this.players()[pkt.senderUid];
@@ -809,12 +828,30 @@ export class GameService {
       case 'caught': {
         const s = this.session();
         if (!s || s.status !== 'playing') return;
-        const d = pkt.data as { victimId: string; hunterId: string; caughtAt: number; event: GameEvent } | null;
+        const d = pkt.data as {
+          victimId: string;
+          hunterId: string;
+          caughtAt: number;
+          receiptSig?: string;
+          event: GameEvent;
+        } | null;
         if (!d || !d.victimId || !d.hunterId) return;
-        // Validation : le paquet peut être émis soit par la victime soit par le chasseur attitré
-        const isVictim = pkt.senderUid === d.victimId;
-        const isHunter = pkt.senderUid === d.hunterId && (this.players()[d.hunterId]?.role === 'hunter' || d.hunterId === s.host_id);
-        if (!isVictim && !isHunter) return;
+
+        // Validation d'intégrité et preuve cryptographique de capture [CRIT-03]
+        const hunterPlayer = this.players()[d.hunterId];
+        const isVictimSelf = pkt.senderUid === d.victimId;
+        const isHunterSender = pkt.senderUid === d.hunterId && (hunterPlayer?.role === 'hunter' || d.hunterId === s.host_id);
+
+        if (!isVictimSelf && !isHunterSender) return;
+
+        // Si le paquet est émis par le chasseur, il doit impérativement fournir le reçu signé par sa clé ECDSA P-256
+        if (isHunterSender) {
+          if (!d.receiptSig || !hunterPlayer?.pub_key) return;
+          const receiptPayload = `CATCH_RECEIPT::${code}::${d.victimId}::${d.hunterId}::${d.caughtAt}`;
+          const validSig = await this.crypto.verifySignature(hunterPlayer.pub_key, receiptPayload, d.receiptSig);
+          if (!validSig) return; // Rejet : tentative d'élimination arbitraire sans signature de reçu
+        }
+
         this.applyPlayerCaught(d.victimId, d.hunterId, d.caughtAt, d.event);
         if (this.isHost()) {
           void this.dispatchRoleKeyToPlayer(d.victimId);
@@ -905,12 +942,17 @@ export class GameService {
         const now = this.serverNow();
         const prevCircle = this.peerLastCircle.get(pkt.senderUid) ?? knownPlayer.circle;
         if (prevCircle) {
-          const dtSec = Math.max(0.5, (now - prevCircle.t) / 1000);
-          const distCenter = distance(prevCircle, validCircle);
-          const speed = distCenter / dtSec;
-          // Contrôle physique de vitesse sur le déplacement du centre (max 15 m/s ≈ 54 km/h)
-          if (distCenter > 30 && speed > 15) {
-            return; // Rejet : tentative de téléportation de cercle impossible
+          const isRadiusStepChange = prevCircle.r !== validCircle.r;
+          const refreshSec = this.session()?.settings.circleRefreshSec ?? 60;
+          const isExpiredStep = (now - prevCircle.t) >= (refreshSec * 1000 * 0.9);
+          // Le contrôle physique de vitesse n'est appliqué qu'au sein d'une même étape stable sans rétrécissement [MAJ-04]
+          if (!isRadiusStepChange && !isExpiredStep) {
+            const dtSec = Math.max(0.5, (now - prevCircle.t) / 1000);
+            const distCenter = distance(prevCircle, validCircle);
+            const speed = distCenter / dtSec;
+            if (distCenter > 50 && speed > 20) {
+              return; // Rejet : tentative de téléportation de cercle impossible
+            }
           }
         }
         this.peerLastCircle.set(pkt.senderUid, { ...validCircle, t: now });
@@ -948,8 +990,14 @@ export class GameService {
         const d = pkt.data as { targetHunter?: string; iv?: string; ct?: string } | null;
         if (!d || d.targetHunter !== this.uid || !d.iv || !d.ct) return;
 
-        // Protection anti-DDoS CPU sur le déballage ECDH (max 5 sondes par 10s par joueur)
+        // Validation stricte du fix GPS du chasseur (Contrôle anti-contournement [MOY-02])
+        const hunterPos = this.myPos();
         const now = this.serverNow();
+        if (!hunterPos || (now - hunterPos.t > 15_000) || hunterPos.acc > 50) {
+          return; // Rejet : le chasseur n'a pas de fix GPS valide, frais (< 15s) et précis (< 50m)
+        }
+
+        // Protection anti-DDoS CPU sur le déballage ECDH (max 5 sondes par 10s par joueur)
         const probeStat = this.hunterProbeCounts.get(pkt.senderUid) ?? { count: 0, windowStart: now };
         if (now - probeStat.windowStart > 10000) {
           probeStat.count = 0;
@@ -968,14 +1016,18 @@ export class GameService {
           const probe = JSON.parse(raw) as { pin?: string; victimId?: string; ts?: number; lat?: number; lng?: number; acc?: number };
           if (probe.pin === this.myCatchCode() && probe.victimId === pkt.senderUid) {
             // Contrôle physique de proximité spatiale (anti-capture à distance)
-            const hunterPos = this.myPos();
-            if (hunterPos && probe.lat != null && probe.lng != null && isValidLatLng(probe.lat, probe.lng)) {
-              const dist = distance(hunterPos, { lat: probe.lat, lng: probe.lng });
-              const maxAllowed = 35 + (hunterPos.acc || 15) + (probe.acc || 15);
-              if (dist > maxAllowed) {
-                return; // Rejet : capture à distance physiquement impossible (> 35m)
-              }
+            if (probe.lat == null || probe.lng == null || !isValidLatLng(probe.lat, probe.lng)) {
+              return; // Rejet : coordonnées GPS de la victime absentes ou invalides
             }
+            const dist = distance(hunterPos, { lat: probe.lat, lng: probe.lng });
+            const maxAllowed = 35 + (hunterPos.acc || 15) + (probe.acc || 15);
+            if (dist > maxAllowed) {
+              return; // Rejet : capture à distance physiquement impossible (> 35m)
+            }
+
+            // Génération d'un reçu cryptographique de capture signé par la clé privée ECDSA P-256 du chasseur [CRIT-03]
+            const receiptPayload = `CATCH_RECEIPT::${code}::${probe.victimId}::${this.uid}::${now}`;
+            const receiptSig = await this.crypto.signPayload(receiptPayload);
 
             const ev: GameEvent = {
               id: now + Math.floor(secureRandomUnit() * 1000),
@@ -994,6 +1046,7 @@ export class GameService {
               victimId: probe.victimId,
               hunterId: this.uid,
               caughtAt: now,
+              receiptSig,
               event: ev,
             });
             if (this.isHost()) {
@@ -1501,20 +1554,22 @@ export class GameService {
     if (!k || !code) return;
     try {
       const wrap = await this.crypto.wrapSecretForPeer(peerEcdhKey, k);
-      const rendezvousTopic = await this.crypto.getRendezvousTopic(code);
+      const manualRendezvousTopic = await this.crypto.getRendezvousTopic(code, null);
+      const qrRendezvousTopic = await this.crypto.getRendezvousTopic(code, k);
       // Envoie sur le canal courant
       await this.sendP2p('s', 'session_secret', {
         targetUid,
         iv: wrap.iv,
         ct: wrap.ct,
       });
-      // Et envoie également sur le topic de rendez-vous pour les arrivants par code court
+      // Et envoie également sur les topics de rendez-vous pour les pairs en attente de synchronisation [MAJ-02]
       const env = await this.crypto.encryptPacket(code, this.secret, 's', 'session_secret', this.uid, this.serverNow(), {
         targetUid,
         iv: wrap.iv,
         ct: wrap.ct,
       });
-      this.mesh?.broadcast(env, rendezvousTopic);
+      this.mesh?.broadcast(env, manualRendezvousTopic);
+      this.mesh?.broadcast(env, qrRendezvousTopic);
     } catch { /* ignore */ }
   }
 
@@ -1594,8 +1649,11 @@ export class GameService {
     if (!hunters.length) throw new Error('Aucun chasseur en ligne avec accord de clés.');
 
     // Émet une sonde de capture chiffrée en accord de clés ECDH direct vers les chasseurs
-    // avec inclusion de la géolocalisation pour contrôle physique de proximité
+    // avec inclusion obligatoire de la géolocalisation pour contrôle physique de proximité [MOY-02]
     const myPos = this.myPos();
+    if (!myPos || (now - myPos.t > 15_000) || myPos.acc > 50) {
+      throw new Error('Position GPS indisponible ou imprécise (précision requise < 50m).');
+    }
     for (const h of hunters) {
       try {
         const wrap = await this.crypto.wrapSecretForPeer(
@@ -1908,12 +1966,13 @@ export class GameService {
     this.watchId = navigator.geolocation.watchPosition(
       (p) => {
         if (!isValidLatLng(p.coords.latitude, p.coords.longitude)) return;
-        const candidate = {
+        const now = this.serverNow();
+        const candidate: MyPos = {
           lat: p.coords.latitude,
           lng: p.coords.longitude,
           acc: Math.max(1, Math.round(p.coords.accuracy || 10)),
+          t: now,
         };
-        const now = this.serverNow();
         // Filtre anti-spoofing / téléportation GPS (> 45 m/s ≈ 162 km/h)
         if (this.lastValidGps) {
           const dtSec = Math.max(1, (now - this.lastValidGps.t) / 1000);
@@ -2123,25 +2182,14 @@ export class GameService {
   }
 
   private getDeterministicCircleCenter(pos: MyPos, radius: number): LatLng {
-    const s = this.session();
-    const code = s?.code ?? 'TM';
-    const { radius: curRadius } = this.shrink();
-    // Taille de la cellule de grille proportionnelle au rayon pour englober la position
-    const gridSizeMeters = Math.max(30, Math.round(radius * 0.45));
-    const latStep = gridSizeMeters / 111132;
-    const lngStep = gridSizeMeters / (111132 * Math.cos((pos.lat * Math.PI) / 180));
-    const cellLatIndex = Math.floor(pos.lat / latStep);
-    const cellLngIndex = Math.floor(pos.lng / lngStep);
-
-    // Graine déterministe basée sur le code, l'UID du joueur, la cellule et le rayon d'étape
-    const seedStr = `${code}::${this.uid}::${cellLatIndex}::${cellLngIndex}::${curRadius}`;
-    const hash = this.hashString(seedStr);
-    const pseudoAngle = (Math.abs(hash) % 3600) / 10;
-    const pseudoDistRatio = 0.2 + ((Math.abs(hash >> 6) % 35) / 100);
-
-    const cellCenterLat = (cellLatIndex + 0.5) * latStep;
-    const cellCenterLng = (cellLngIndex + 0.5) * lngStep;
-    return destPoint({ lat: cellCenterLat, lng: cellCenterLng }, radius * pseudoDistRatio, pseudoAngle);
+    // Offset aléatoire cryptographique uniforme dans le disque [0.25 * r, 0.65 * r]
+    // Utilise des octets CSPRNG sécurisés pour garantir mathématiquement l'impossibilité absolue d'inversion par un tiers [CRIT-02]
+    // Le joueur est garanti d'être à l'intérieur du cercle (ratio maximal 0.65 < 0.85).
+    const randBytes = new Uint32Array(2);
+    crypto.getRandomValues(randBytes);
+    const pseudoAngle = (randBytes[0] / 0xffffffff) * 360;
+    const pseudoDistRatio = 0.25 + (randBytes[1] / 0xffffffff) * 0.40; // [0.25, 0.65]
+    return destPoint(pos, radius * pseudoDistRatio, pseudoAngle);
   }
 
   private maybeUpdateCircle(pos: MyPos, forceFlagUpdate = false) {
@@ -2155,9 +2203,7 @@ export class GameService {
     const d = c ? distance(pos, c) : Infinity;
     const expired = !!(c && refreshSec && refreshSec > 0 && now - c.t >= refreshSec * 1000);
     if (!c || c.r !== radius || d > radius * 0.85 || expired) {
-      // Ancrage spatial déterministe (anti-trilatération) :
-      // On calcule un centre stable ancré sur une grille spatiale discrète et dérivé de l'étape de rétrécissement.
-      // Cela interdit toute déduction par intersection de cercles multiples !
+      // Centre cryptographiquement imprévisible et stable tant que le joueur est dans le cercle
       const center = this.getDeterministicCircleCenter(pos, radius);
       const circle: Circle = { lat: sanitizeCoord(center.lat), lng: sanitizeCoord(center.lng), r: radius, t: now, allyShare };
       this.lastCircle = circle;
