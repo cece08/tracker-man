@@ -59,7 +59,7 @@ export interface Player {
 export interface GameEvent {
   id: number;
   session_code: string;
-  type: 'start' | 'caught' | 'out_of_zone' | 'pos' | 'track';
+  type: 'start' | 'caught' | 'out_of_zone' | 'pos' | 'track' | 'track_summary';
   t: number;
   data: {
     victim?: string;
@@ -72,6 +72,9 @@ export interface GameEvent {
     playerId?: string;
     playerName?: string;
     points?: Pos[];
+    distanceMeters?: number;
+    survivedMs?: number;
+    capturesCount?: number;
   };
 }
 

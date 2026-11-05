@@ -55,6 +55,12 @@ interface PlayerReport {
             <h3>🗺️ Trajectoires de la partie</h3>
             <button class="btn ghost small" (click)="fitAll()">Recentrer</button>
           </div>
+          @if (!game.myTrackShared() && game.myTrackLength() > 0) {
+            <div class="row-between" style="background: rgba(59, 139, 255, 0.08); border: 1px solid rgba(59, 139, 255, 0.2); border-radius: 8px; padding: 10px 14px; margin-bottom: 12px; gap: 8px;">
+              <span class="hint" style="font-size: 13px; color: var(--text)">🔒 Ta trace GPS est confidentielle par défaut (Minimisation RGPD).</span>
+              <button class="btn secondary small" (click)="game.shareMyTrackOnMap()">📍 Partager sur la carte</button>
+            </div>
+          }
           <p class="hint">Touche un joueur ci-dessous pour filtrer sa trace. Les ⭐ marquent les captures.</p>
           <div class="filter-chips">
             <button class="chip" [class.active]="selectedPlayer() === null" (click)="selectPlayer(null)">
@@ -254,6 +260,7 @@ export class EndView implements AfterViewInit, OnDestroy {
     const startAt = s?.start_at ?? 0;
     const endAt = s?.ended_at ?? this.game.now();
     const byPlayer = new Map<string, Pos[]>();
+    const summaries = new Map<string, { distanceMeters: number; survivedMs: number; capturesCount: number }>();
 
     for (const e of events) {
       if (e.type === 'track' && e.data.playerId && Array.isArray(e.data.points)) {
@@ -264,6 +271,12 @@ export class EndView implements AfterViewInit, OnDestroy {
         let arr = byPlayer.get(e.data.playerId);
         if (!arr) { arr = []; byPlayer.set(e.data.playerId, arr); }
         arr.push({ lat: e.data.lat, lng: e.data.lng, t: e.t, role: e.data.role });
+      } else if (e.type === 'track_summary' && e.data.playerId) {
+        summaries.set(e.data.playerId, {
+          distanceMeters: e.data.distanceMeters ?? 0,
+          survivedMs: e.data.survivedMs ?? 0,
+          capturesCount: e.data.capturesCount ?? 0,
+        });
       }
     }
 
@@ -273,10 +286,12 @@ export class EndView implements AfterViewInit, OnDestroy {
       let dist = 0;
       for (let i = 1; i < pts.length; i++) dist += distance(pts[i - 1], pts[i]);
 
-      const capturesCount = events.filter((e) => e.type === 'caught' && e.data.hunter === p.id).length;
-      const survivedMs = p.initial_role === 'hunter'
+      const summary = summaries.get(p.id);
+      const capturesCount = summary?.capturesCount ?? events.filter((e) => e.type === 'caught' && e.data.hunter === p.id).length;
+      const survivedMs = summary?.survivedMs ?? (p.initial_role === 'hunter'
         ? 0
-        : Math.max(0, (p.caught_at ?? endAt) - startAt);
+        : Math.max(0, (p.caught_at ?? endAt) - startAt));
+      const distanceMeters = pts.length > 1 ? Math.round(dist) : (summary?.distanceMeters ?? Math.round(dist));
 
       let statusLabel = 'Survivant 🏆';
       let statusType: PlayerReport['statusType'] = 'survived';

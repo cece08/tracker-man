@@ -20,7 +20,9 @@ export type PacketType =
   | 'hunter_pos'
   | 'ally_pos'
   | 'track'
+  | 'track_summary'
   | 'rtc_signal'
+  | 'session_secret'
   | 'catch_probe';
 
 export interface E2eeEnvelope {
@@ -40,8 +42,6 @@ interface SessionKeySuite {
   code: string;
   blindTopic: string;
   sessionKey: CryptoKey;
-  hunterKey: CryptoKey;
-  allyKey: CryptoKey;
   localKey: CryptoKey;
 }
 
@@ -62,7 +62,6 @@ export interface EncryptedRoleTicket {
 }
 
 const PBKDF2_ITERATIONS = 250_000;
-const CATCH_PBKDF2_ITERATIONS = 60_000;
 const MAX_CLOCK_SKEW_MS = 300_000; // Tolérance 5 min pour horloges historiques
 const REALTIME_MAX_CLOCK_SKEW_MS = 25_000; // Tolérance stricte 25s pour coordonnées en direct (anti-rejeu)
 const MAX_REPLAY_CACHE = 5000;
@@ -562,18 +561,22 @@ export class CryptoService {
       ['encrypt', 'decrypt'],
     );
 
-    const [sessionKey, hunterKey, allyKey] = await Promise.all([
-      deriveAesKey('scope:session-general-v2'),
-      deriveAesKey('scope:role-hunter-pos-v2'),
-      deriveAesKey('scope:role-ally-hunted-pos-v2'),
-    ]);
+    const sessionKey = await deriveAesKey('scope:session-general-v2');
 
-    return { code, blindTopic, sessionKey, hunterKey, allyKey, localKey };
+    return { code, blindTopic, sessionKey, localKey };
   }
 
   private pickKey(suite: SessionKeySuite, scope: KeyScope): CryptoKey {
-    if (scope === 'h') return this.dynamicHunterKey ?? suite.hunterKey;
-    if (scope === 'a') return this.dynamicAllyKey ?? suite.allyKey;
+    // Isolation Zero-Knowledge absolue : AUCUN fallback statique.
+    // Les clés de rôles doivent provenir impérativement de l'accord de clés asymétrique ECDH P-256 individuel.
+    if (scope === 'h') {
+      if (!this.dynamicHunterKey) throw new Error('Accès refusé : aucune clé chasseur ECDH.');
+      return this.dynamicHunterKey;
+    }
+    if (scope === 'a') {
+      if (!this.dynamicAllyKey) throw new Error('Accès refusé : aucune clé allié ECDH.');
+      return this.dynamicAllyKey;
+    }
     return suite.sessionKey;
   }
 
@@ -755,38 +758,6 @@ export class CryptoService {
     const view = new DataView(mac);
     const num = (view.getUint32(0, false) & 0x7fffffff) % 10000;
     return String(num).padStart(4, '0');
-  }
-
-  /**
-   * Calcule l'engagement cryptographique (commitment PBKDF2-SHA-256 à 60 000 itérations)
-   * d'un code chasseur à 4 chiffres afin de permettre aux chassés de vérifier un code
-   * saisi sans jamais exposer le code en clair sur le réseau.
-   */
-  async computeCatchCommitment(
-    code: string,
-    startAt: number,
-    hunterUid: string,
-    catchCode4: string,
-  ): Promise<string> {
-    const enc = new TextEncoder();
-    const baseKey = await crypto.subtle.importKey(
-      'raw',
-      enc.encode(`TM-CATCH-PIN::${catchCode4.trim()}`),
-      'PBKDF2',
-      false,
-      ['deriveBits'],
-    );
-    const bits = await crypto.subtle.deriveBits(
-      {
-        name: 'PBKDF2',
-        salt: enc.encode(`TM-CatchSalt-v2::${code.toUpperCase()}::${startAt}::${hunterUid}`),
-        iterations: CATCH_PBKDF2_ITERATIONS,
-        hash: 'SHA-256',
-      },
-      baseKey,
-      256,
-    );
-    return toHex(new Uint8Array(bits));
   }
 
   /** Chiffre des données temporaires pour `sessionStorage` avec la clé locale de l'appareil. */
