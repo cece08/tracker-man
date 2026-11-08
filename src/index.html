@@ -17,9 +17,20 @@
   <link rel="icon" type="image/png" href="icons/icon-192x192.png">
   <link rel="apple-touch-icon" href="icons/icon-192x192.png">
   <link rel="manifest" href="manifest.webmanifest">
+  <script src="boot-guard.js"></script>
 </head>
-<body>
-  <app-root></app-root>
+<body style="background:#0f1115;margin:0">
+  <app-root>
+    <!-- Écran de chargement affiché tant qu'Angular n'a pas démarré (remplacé automatiquement au lancement) -->
+    <div id="boot-splash" style="min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;color:#c9ced8;font-family:system-ui,-apple-system,Roboto,sans-serif;text-align:center;padding:24px;box-sizing:border-box">
+      <img src="icons/icon-192x192.png" alt="" width="96" height="96" style="border-radius:22px">
+      <div style="font-size:15px;opacity:.8">Chargement de Tracker Man…</div>
+      <div id="boot-repair" style="display:none;max-width:320px">
+        <p style="font-size:14px;line-height:1.4;margin:0 0 14px">Le chargement prend plus de temps que prévu.</p>
+        <button id="boot-repair-btn" type="button" style="background:#ff6a2b;color:#fff;border:0;border-radius:12px;padding:14px 22px;font-size:16px;font-weight:600">🔄 Réparer et recharger</button>
+      </div>
+    </div>
+  </app-root>
   <noscript>Active JavaScript pour utiliser Tracker Man.</noscript>
 </body>
 </html>

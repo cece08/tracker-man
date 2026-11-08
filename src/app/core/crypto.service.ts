@@ -238,8 +238,23 @@ export class CryptoService {
     return randomHex(byteLen);
   }
 
-  /** Calcule une preuve de travail légère (16 bits de zéros) anti-Sybil/anti-flood en ~40ms. */
-  async solveProofOfWork(code: string, uid: string): Promise<string> {
+  // Caches mémoire des calculs coûteux (PBKDF2 / PoW) : évite de saturer le CPU des téléphones
+  // lors des retransmissions de join_req (sinon le délai de connexion expire avant la fin des calculs).
+  private rendezvousCache = new Map<string, Promise<string>>();
+  private powCache = new Map<string, Promise<string>>();
+
+  /** Calcule une preuve de travail légère (16 bits de zéros) anti-Sybil/anti-flood (résultat mis en cache). */
+  solveProofOfWork(code: string, uid: string): Promise<string> {
+    const cacheKey = `${code.toUpperCase()}::${uid}`;
+    const cached = this.powCache.get(cacheKey);
+    if (cached) return cached;
+    const p = this.computeProofOfWork(code, uid);
+    this.powCache.set(cacheKey, p);
+    p.catch(() => this.powCache.delete(cacheKey));
+    return p;
+  }
+
+  private async computeProofOfWork(code: string, uid: string): Promise<string> {
     const enc = new TextEncoder();
     const prefix = `${code.toUpperCase()}::${uid}::`;
     let nonce = 0;
@@ -262,9 +277,20 @@ export class CryptoService {
     return bytes[0] === 0 && bytes[1] === 0;
   }
 
-  /** Topic de rendez-vous chiffré pour négociation initiale des sessions. */
-  async getRendezvousTopic(code: string, sharedEntropyHex?: string | null): Promise<string> {
+  /** Topic de rendez-vous chiffré pour négociation initiale des sessions (résultat mis en cache). */
+  getRendezvousTopic(code: string, sharedEntropyHex?: string | null): Promise<string> {
     const cleanCode = code.trim().toUpperCase();
+    const entropy = sharedEntropyHex && sharedEntropyHex.length >= 32 ? sharedEntropyHex : '';
+    const cacheKey = `${cleanCode}::${entropy}`;
+    const cached = this.rendezvousCache.get(cacheKey);
+    if (cached) return cached;
+    const p = this.computeRendezvousTopic(cleanCode, entropy || null);
+    this.rendezvousCache.set(cacheKey, p);
+    p.catch(() => this.rendezvousCache.delete(cacheKey));
+    return p;
+  }
+
+  private async computeRendezvousTopic(cleanCode: string, sharedEntropyHex: string | null): Promise<string> {
     const enc = new TextEncoder();
     if (sharedEntropyHex && sharedEntropyHex.length >= 32) {
       // Pour les sessions par QR Code / lien direct : HMAC-SHA-256 avec 128 bits d'entropie CSPRNG (espace > 10^38)

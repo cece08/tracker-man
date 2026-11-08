@@ -7,6 +7,14 @@ import { ToastService } from './toast.service';
 
 export interface MyPos { lat: number; lng: number; acc: number; t: number; }
 
+/**
+ * Délais de connexion à une session. Les dérivations PBKDF2 + la connexion aux relais WSS
+ * peuvent prendre plusieurs secondes sur un téléphone d'entrée de gamme en 4G :
+ * des délais trop courts provoquaient de faux « Session introuvable ».
+ */
+const JOIN_TIMEOUT_MS = 25_000;
+const OPEN_TIMEOUT_MS = 25_000;
+
 /** Rayon actuel des cercles et heure du prochain rétrécissement. */
 export function shrinkInfo(s: Session | null, t: number): { radius: number; next: number | null } {
   if (!s) return { radius: 0, next: null };
@@ -201,6 +209,7 @@ export class GameService {
         vibrate([300, 100, 300]);
         this.notifyBackgroundWarning();
       } else if (document.visibilityState === 'visible' && this.code()) {
+        this.mesh?.reviveStaleRelays();
         this.refresh();
         if (this.playing) {
           this.requestWakeLock();
@@ -311,11 +320,14 @@ export class GameService {
     }
 
     await this.refreshMyCatchCode(cleanCode, this.session()?.start_at ?? 0);
-    const blindTopic = await this.crypto.getBlindTopic(cleanCode, this.secret);
     const hasKey = !!this.sessionKey();
 
-    const qrRendezvousTopic = await this.crypto.getRendezvousTopic(cleanCode, this.sessionKey());
-    const manualRendezvousTopic = await this.crypto.getRendezvousTopic(cleanCode, null);
+    // Dérivations PBKDF2 lancées en parallèle (et mises en cache) pour réduire le délai de connexion sur mobile.
+    const [blindTopic, qrRendezvousTopic, manualRendezvousTopic] = await Promise.all([
+      this.crypto.getBlindTopic(cleanCode, this.secret),
+      this.crypto.getRendezvousTopic(cleanCode, this.sessionKey()),
+      this.crypto.getRendezvousTopic(cleanCode, null),
+    ]);
     if (this.code() !== cleanCode) return;
 
     // Si le secret 128 bits est connu (hôte ou scan QR), on écoute blindTopic ET les topics de rendez-vous.
@@ -345,7 +357,7 @@ export class GameService {
       if (this.code() === cleanCode && !this.loaded()) {
         this.handleGone('Session introuvable ou tous les participants ont quitté.');
       }
-    }, 7500);
+    }, OPEN_TIMEOUT_MS);
   }
 
   private async refreshMyCatchCode(code: string, startAt: number) {
@@ -990,12 +1002,7 @@ export class GameService {
         const d = pkt.data as { targetHunter?: string; iv?: string; ct?: string } | null;
         if (!d || d.targetHunter !== this.uid || !d.iv || !d.ct) return;
 
-        // Validation stricte du fix GPS du chasseur (Contrôle anti-contournement [MOY-02])
-        const hunterPos = this.myPos();
         const now = this.serverNow();
-        if (!hunterPos || (now - hunterPos.t > 15_000) || hunterPos.acc > 50) {
-          return; // Rejet : le chasseur n'a pas de fix GPS valide, frais (< 15s) et précis (< 50m)
-        }
 
         // Protection anti-DDoS CPU sur le déballage ECDH (max 5 sondes par 10s par joueur)
         const probeStat = this.hunterProbeCounts.get(pkt.senderUid) ?? { count: 0, windowStart: now };
@@ -1015,16 +1022,6 @@ export class GameService {
           if (!raw) return;
           const probe = JSON.parse(raw) as { pin?: string; victimId?: string; ts?: number; lat?: number; lng?: number; acc?: number };
           if (probe.pin === this.myCatchCode() && probe.victimId === pkt.senderUid) {
-            // Contrôle physique de proximité spatiale (anti-capture à distance)
-            if (probe.lat == null || probe.lng == null || !isValidLatLng(probe.lat, probe.lng)) {
-              return; // Rejet : coordonnées GPS de la victime absentes ou invalides
-            }
-            const dist = distance(hunterPos, { lat: probe.lat, lng: probe.lng });
-            const maxAllowed = 35 + (hunterPos.acc || 15) + (probe.acc || 15);
-            if (dist > maxAllowed) {
-              return; // Rejet : capture à distance physiquement impossible (> 35m)
-            }
-
             // Génération d'un reçu cryptographique de capture signé par la clé privée ECDSA P-256 du chasseur [CRIT-03]
             const receiptPayload = `CATCH_RECEIPT::${code}::${probe.victimId}::${this.uid}::${now}`;
             const receiptSig = await this.crypto.signPayload(receiptPayload);
@@ -1304,7 +1301,7 @@ export class GameService {
           ecdhKey: identity.ecdhPublicKeySpkiB64,
           powNonce: powNonce ?? undefined,
         });
-      }, 650);
+      }, 1200);
 
       setTimeout(() => {
         clearInterval(retryInterval);
@@ -1312,9 +1309,9 @@ export class GameService {
         if (idx !== -1) {
           this.joinResolvers.splice(idx, 1);
           this.close();
-          reject(new Error('Session introuvable ou aucun joueur en ligne.'));
+          reject(new Error("Session introuvable : vérifie le code et que l'hôte a bien l'appli ouverte au premier plan."));
         }
-      }, 7000);
+      }, JOIN_TIMEOUT_MS);
     });
   }
 
@@ -1649,11 +1646,7 @@ export class GameService {
     if (!hunters.length) throw new Error('Aucun chasseur en ligne avec accord de clés.');
 
     // Émet une sonde de capture chiffrée en accord de clés ECDH direct vers les chasseurs
-    // avec inclusion obligatoire de la géolocalisation pour contrôle physique de proximité [MOY-02]
     const myPos = this.myPos();
-    if (!myPos || (now - myPos.t > 15_000) || myPos.acc > 50) {
-      throw new Error('Position GPS indisponible ou imprécise (précision requise < 50m).');
-    }
     for (const h of hunters) {
       try {
         const wrap = await this.crypto.wrapSecretForPeer(

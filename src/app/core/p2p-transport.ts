@@ -90,6 +90,7 @@ export class P2pSessionMesh {
   private closed = false;
   private bc: BroadcastChannel | null = null;
   private sockets: WebSocket[] = [];
+  private lastRx: number[] = [];
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private reconnectTimers: ReturnType<typeof setTimeout>[] = [];
   private connectedOnce = false;
@@ -151,12 +152,35 @@ export class P2pSessionMesh {
     WSS_RELAYS.forEach((url, idx) => this.connectRelay(url, idx, 0));
   }
 
+  /**
+   * Relance les relais WSS morts ou « zombies » (ex. après passage de l'appli en arrière-plan :
+   * Android gèle les WebSockets sans toujours déclencher `onclose`).
+   */
+  reviveStaleRelays(maxSilenceMs = 30_000) {
+    if (this.closed) return;
+    const now = Date.now();
+    WSS_RELAYS.forEach((url, idx) => {
+      const ws = this.sockets[idx];
+      const silent = now - (this.lastRx[idx] ?? 0) > maxSilenceMs;
+      const dead = !ws || ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED;
+      if (!dead && !silent) return;
+      if (ws) {
+        ws.onclose = null;
+        ws.onerror = null;
+        ws.onmessage = null;
+        try { ws.close(); } catch { /* ignore */ }
+      }
+      this.connectRelay(url, idx, 0);
+    });
+  }
+
   private connectRelay(url: string, idx: number, attempt: number) {
     if (this.closed) return;
     try {
       const ws = new WebSocket(url, 'mqtt');
       ws.binaryType = 'arraybuffer';
       this.sockets[idx] = ws;
+      this.lastRx[idx] = Date.now();
 
       const randSuffix = Array.from(crypto.getRandomValues(new Uint8Array(5)), (b) =>
         b.toString(16).padStart(2, '0'),
@@ -175,6 +199,7 @@ export class P2pSessionMesh {
 
       ws.onmessage = (ev) => {
         if (this.closed || !(ev.data instanceof ArrayBuffer)) return;
+        this.lastRx[idx] = Date.now();
         this.parseMqttFrames(ws, new Uint8Array(ev.data));
       };
 

@@ -9,3 +9,8 @@
   Permissions-Policy: geolocation=(self), camera=(), microphone=(), payment=(), usb=(), bluetooth=(), magnetometer=(), gyroscope=(), accelerometer=(), ambient-light-sensor=(), autoplay=(), display-capture=(), document-domain=(), encrypted-media=(), fullscreen=(self), gamepad=(), hid=(), idle-detection=(), local-fonts=(), midi=(), otp-credentials=(), picture-in-picture=(), publickey-credentials-get=(), screen-wake-lock=(self), serial=(), speaker-selection=(), storage-access=(), xr-spatial-tracking=(), interest-cohort=()
   Cross-Origin-Opener-Policy: same-origin
   Cross-Origin-Resource-Policy: same-origin
+
+/.well-known/assetlinks.json
+  Content-Type: application/json
+  Access-Control-Allow-Origin: *
+  Cache-Control: max-age=3600
