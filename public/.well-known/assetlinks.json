@@ -5,7 +5,10 @@
       "namespace": "android_app",
       "package_name": "app.trackerman.twa",
       "sha256_cert_fingerprints": [
-        "A6:8F:38:EF:94:53:81:49:61:DA:C4:F6:38:1E:0F:7C:36:36:5E:B6:B9:9B:DC:81:C1:B7:29:6E:C1:13:87:B0"
+        "A6:8F:38:EF:94:53:81:49:61:DA:C4:F6:38:1E:0F:7C:36:36:5E:B6:B9:9B:DC:81:C1:B7:29:6E:C1:13:87:B0",
+        "72:AF:27:E5:FB:8C:50:C1:01:80:0B:0E:85:97:0D:39:47:67:59:C9:12:B5:F7:F6:31:C3:09:0E:30:91:EF:31",
+        "8C:C6:42:F0:EF:F0:2A:34:E4:56:36:B1:54:B3:BF:A2:E2:DC:1C:C4:6C:78:A3:7F:1A:68:2D:DE:A4:D8:03:3C",
+        "7F:BF:42:77:C8:FD:EC:02:EF:5E:AE:2B:3A:33:74:B4:8E:A8:D9:5C:12:B3:98:FE:83:31:FE:BD:0A:FA:88:65"
       ]
     }
   }
